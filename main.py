@@ -192,6 +192,22 @@ async def fetch_tide_range(client: httpx.AsyncClient, station: str) -> tuple:
     vals = [float(p["v"]) for p in preds]
     return min(vals), max(vals)
 
+async def fetch_tide_curve(client: httpx.AsyncClient, station: str) -> list:
+    """Fetch hourly tide predictions for today, return 24 normalized values 0.0-1.0"""
+    url = (
+        f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+        f"?date=today&station={station}&product=predictions&interval=h"
+        f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json"
+    )
+    r = await client.get(url, timeout=10)
+    r.raise_for_status()
+    preds = r.json().get("predictions", [])
+    if not preds: return []
+    vals = [float(p["v"]) for p in preds]
+    mn, mx = min(vals), max(vals)
+    rng = mx - mn if mx - mn > 0.1 else 1.0
+    return [round((v - mn) / rng, 3) for v in vals]
+
 async def fetch_water_temp(client: httpx.AsyncClient, spot: dict) -> float:
     url = (
         f"https://marine-api.open-meteo.com/v1/marine"
@@ -230,11 +246,12 @@ async def get_surf(spot_id: str):
         wind_task        = fetch_wind(client, spot)
         tide_now_task    = fetch_tide_current(client, spot["tide_station"])
         tide_range_task  = fetch_tide_range(client, spot["tide_station"])
+        tide_curve_task  = fetch_tide_curve(client, spot["tide_station"])
         water_temp_task  = fetch_water_temp(client, spot)
 
         try:
-            marine, wind, tide_now, tide_range, water_temp = await asyncio.gather(
-                marine_task, wind_task, tide_now_task, tide_range_task, water_temp_task,
+            marine, wind, tide_now, tide_range, tide_curve, water_temp = await asyncio.gather(
+                marine_task, wind_task, tide_now_task, tide_range_task, tide_curve_task, water_temp_task,
                 return_exceptions=True
             )
         except Exception as e:
@@ -271,6 +288,7 @@ async def get_surf(spot_id: str):
     # Tide
     tide_min, tide_max = tide_range if not isinstance(tide_range, Exception) else (0.0, 6.0)
     tide_cur = tide_now if not isinstance(tide_now, Exception) else 3.0
+    tide_pts = tide_curve if not isinstance(tide_curve, Exception) else []
     wtemp = water_temp if not isinstance(water_temp, Exception) else 0.0
 
     # Wave model
@@ -300,6 +318,8 @@ async def get_surf(spot_id: str):
         "tide_now":    round(tide_cur, 2),
         "tide_min":    round(tide_min, 2),
         "tide_max":    round(tide_max, 2),
+        "tide_curve":  tide_pts,
         "water_temp":  round(wtemp, 1),
+        "tmrw_flat":   tmrw_ft < 0.5,
         "updated":     datetime.utcnow().isoformat() + "Z",
     }
