@@ -193,28 +193,28 @@ async def fetch_tide_curve(client, station):
     if not data:
         return []
 
-    preds = data.get("predictions", [])
-    if data2:
-        preds += data2.get("predictions", [])
+    preds_today    = data.get("predictions", []) if data else []
+    preds_tomorrow = data2.get("predictions", []) if data2 else []
 
-    if len(preds) < 2:
+    if len(preds_today) < 2 and len(preds_tomorrow) < 2:
         return []
 
-    # Parse all hi/lo events into absolute minutes since midnight today
-    now_utc = datetime.now(timezone.utc)
-    # EDT = UTC-4
-    now_local = now_utc - timedelta(hours=4)
+    # Parse into absolute minutes since midnight local today
+    now_utc   = datetime.now(timezone.utc)
+    now_local = now_utc - timedelta(hours=4)  # EDT
     now_mins  = now_local.hour * 60 + now_local.minute
+    today     = now_local.date()
 
     events = []
-    for p in preds:
+    for p in preds_today + preds_tomorrow:
         try:
             t = dt.strptime(p["t"], "%Y-%m-%d %H:%M")
-            # Convert to minutes since midnight today
-            today = now_local.date()
             delta_days = (t.date() - today).days
             mins = delta_days * 1440 + t.hour * 60 + t.minute
-            events.append((mins, float(p["v"])))
+            val  = float(p["v"])
+            # Deduplicate — only add if not already present at this time
+            if not any(abs(e[0] - mins) < 5 for e in events):
+                events.append((mins, val))
         except:
             pass
 
