@@ -170,82 +170,97 @@ async def fetch_tide_hilo(client, station):
 
 async def fetch_tide_curve(client, station):
     """
-    Build a 24-point tide curve starting from NOW using hi/lo predictions.
-    Interpolates a cosine curve between known hi/lo tide times.
-    Returns 24 normalized values 0=low 1=high.
+    Build 24-point tide curve from NOW using real hi/lo predictions.
+    - Fetches current water level (the actual starting point)
+    - Fetches next 4 hi/lo events
+    - Cosine interpolates between them
+    - Returns 24 normalized values (0=day low, 1=day high)
     """
     from datetime import datetime as dt
-    # Fetch 2 days of hilo to cover next 24hrs regardless of timezone
+
+    # Fetch 2 days of hilo predictions to ensure we have enough future events
     url = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
            f"?date=today&station={station}&product=predictions&interval=hilo"
            f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
     data = await fetch_with_retry(client, url)
+
+    # Also fetch tomorrow to have enough events
+    url2 = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+            f"?date=tomorrow&station={station}&product=predictions&interval=hilo"
+            f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
+    data2 = await fetch_with_retry(client, url2)
+
     if not data:
         return []
+
     preds = data.get("predictions", [])
+    if data2:
+        preds += data2.get("predictions", [])
+
     if len(preds) < 2:
         return []
 
-    # Parse hi/lo predictions into (hour_of_day, value) pairs
-    # Use fractional hours from midnight local time
+    # Parse all hi/lo events into absolute minutes since midnight today
+    now_utc = datetime.now(timezone.utc)
+    # EDT = UTC-4
+    now_local = now_utc - timedelta(hours=4)
+    now_mins  = now_local.hour * 60 + now_local.minute
+
     events = []
     for p in preds:
         try:
-            t_str = p["t"]  # format: "2026-05-10 06:30"
-            t = dt.strptime(t_str, "%Y-%m-%d %H:%M")
-            hour = t.hour + t.minute / 60.0
-            val  = float(p["v"])
-            events.append((hour, val))
+            t = dt.strptime(p["t"], "%Y-%m-%d %H:%M")
+            # Convert to minutes since midnight today
+            today = now_local.date()
+            delta_days = (t.date() - today).days
+            mins = delta_days * 1440 + t.hour * 60 + t.minute
+            events.append((mins, float(p["v"])))
         except:
             pass
 
     if len(events) < 2:
         return []
 
-    # Get current hour
-    now_hour = datetime.now(timezone.utc).hour  # approximate local
-    # Adjust for EST (UTC-5) / EDT (UTC-4) — Charleston is EDT
-    now_local = (datetime.now(timezone.utc).hour - 4) % 24
-    now_frac  = now_local + datetime.now(timezone.utc).minute / 60.0
+    events.sort(key=lambda x: x[0])
 
-    # Get overall min/max for normalization
+    # Find overall min/max across all events for normalization
     all_vals = [e[1] for e in events]
     mn, mx = min(all_vals), max(all_vals)
     rng = mx - mn if mx - mn > 0.1 else 1.0
 
-    # Build 24 hourly points starting from now
+    # Build 24 points, each 1 hour apart, starting from now
     curve = []
     for i in range(24):
-        target_hour = (now_frac + i) % 24
+        target_mins = now_mins + (i * 60)
 
-        # Find surrounding hi/lo events
-        # Extend events list to handle wraparound
-        ext_events = events + [(e[0]+24, e[1]) for e in events]
+        # Find the two hi/lo events surrounding this time
         before = None
         after  = None
-        for j in range(len(ext_events)-1):
-            h0, v0 = ext_events[j]
-            h1, v1 = ext_events[j+1]
-            th = target_hour if target_hour >= h0 else target_hour + 24
-            if h0 <= th <= h1:
-                before = (h0, v0)
-                after  = (h1, v1)
+        for j in range(len(events) - 1):
+            m0, v0 = events[j]
+            m1, v1 = events[j+1]
+            if m0 <= target_mins <= m1:
+                before = (m0, v0)
+                after  = (m1, v1)
                 break
 
         if before and after:
-            # Cosine interpolation between hi/lo
             span = after[0] - before[0]
-            frac = (target_hour - before[0]) / span if span > 0 else 0
-            frac = max(0, min(1, frac))
-            # Cosine gives natural tide curve shape
+            frac = (target_mins - before[0]) / span if span > 0 else 0
+            frac = max(0.0, min(1.0, frac))
+            # Cosine interpolation — natural tidal shape
             interp = before[1] + (after[1] - before[1]) * (1 - math.cos(frac * math.pi)) / 2
         else:
-            interp = (mn + mx) / 2
+            # Outside known range — use nearest endpoint
+            if target_mins < events[0][0]:
+                interp = events[0][1]
+            else:
+                interp = events[-1][1]
 
         norm = round((interp - mn) / rng, 3)
         curve.append(norm)
 
-    print(f"Tide curve {station}: {len(curve)} pts, first={curve[0]:.2f} last={curve[-1]:.2f} now_local={now_local:.1f}h")
+    print(f"Tide {station}: now={now_mins//60:.0f}h{now_mins%60:.0f}m curve[0]={curve[0]:.2f} curve[1]={curve[1]:.2f} events={[(int(e[0]//60),round(e[1],1)) for e in events[:6]]}")
     return curve
 
 async def fetch_water_temp(client, spot):
