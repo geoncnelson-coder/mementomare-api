@@ -170,98 +170,88 @@ async def fetch_tide_hilo(client, station):
 
 async def fetch_tide_curve(client, station):
     """
-    Build 24-point tide curve from NOW using real hi/lo predictions.
-    - Fetches current water level (the actual starting point)
-    - Fetches next 4 hi/lo events
-    - Cosine interpolates between them
-    - Returns 24 normalized values (0=day low, 1=day high)
+    Returns tide data for the ESP32 to plot:
+    - current_norm: current tide height normalized 0-1
+    - peaks: list of next 3 hi/lo events as {time_frac, norm, type}
+      time_frac = 0.0 (now) to 1.0 (24hrs from now)
+      norm = 0.0 (day low) to 1.0 (day high)
+    ESP32 will:
+    - Plot current at x=6 (10% from left)
+    - Plot next 3 peaks at their time_frac x positions
+    - Cosine interpolate between all points
     """
     from datetime import datetime as dt
 
-    # Fetch 2 days of hilo predictions to ensure we have enough future events
-    url = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
-           f"?date=today&station={station}&product=predictions&interval=hilo"
-           f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
-    data = await fetch_with_retry(client, url)
-
-    # Also fetch tomorrow to have enough events
+    # Fetch today + tomorrow hilo
+    url1 = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+            f"?date=today&station={station}&product=predictions&interval=hilo"
+            f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
     url2 = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
             f"?date=tomorrow&station={station}&product=predictions&interval=hilo"
             f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
-    data2 = await fetch_with_retry(client, url2)
+    data1, data2 = await asyncio.gather(
+        fetch_with_retry(client, url1),
+        fetch_with_retry(client, url2),
+        return_exceptions=True
+    )
 
-    if not data:
-        return []
+    preds = []
+    if isinstance(data1, dict): preds += data1.get("predictions", [])
+    if isinstance(data2, dict): preds += data2.get("predictions", [])
+    if len(preds) < 2: return []
 
-    preds_today    = data.get("predictions", []) if data else []
-    preds_tomorrow = data2.get("predictions", []) if data2 else []
-
-    if len(preds_today) < 2 and len(preds_tomorrow) < 2:
-        return []
-
-    # Parse into absolute minutes since midnight local today
+    # Current local time (EDT = UTC-4)
     now_utc   = datetime.now(timezone.utc)
-    now_local = now_utc - timedelta(hours=4)  # EDT
+    now_local = now_utc - timedelta(hours=4)
     now_mins  = now_local.hour * 60 + now_local.minute
     today     = now_local.date()
 
+    # Parse all events into minutes-since-midnight-today, deduplicated
     events = []
-    for p in preds_today + preds_tomorrow:
+    for p in preds:
         try:
             t = dt.strptime(p["t"], "%Y-%m-%d %H:%M")
             delta_days = (t.date() - today).days
             mins = delta_days * 1440 + t.hour * 60 + t.minute
             val  = float(p["v"])
-            # Deduplicate — only add if not already present at this time
             if not any(abs(e[0] - mins) < 5 for e in events):
-                events.append((mins, val))
+                events.append((mins, val, p.get("type","H")))
         except:
             pass
-
-    if len(events) < 2:
-        return []
-
     events.sort(key=lambda x: x[0])
 
-    # Find overall min/max across all events for normalization
+    if len(events) < 2: return []
+
+    # Overall min/max for normalization
     all_vals = [e[1] for e in events]
     mn, mx = min(all_vals), max(all_vals)
     rng = mx - mn if mx - mn > 0.1 else 1.0
 
-    # Build 24 points, each 1 hour apart, starting from now
-    curve = []
-    for i in range(24):
-        target_mins = now_mins + (i * 60)
+    # Get current tide height via cosine interpolation between surrounding events
+    current_norm = 0.5
+    for i in range(len(events)-1):
+        m0, v0, _ = events[i]
+        m1, v1, _ = events[i+1]
+        if m0 <= now_mins <= m1:
+            span = m1 - m0
+            frac = (now_mins - m0) / span if span > 0 else 0
+            interp = v0 + (v1 - v0) * (1 - math.cos(frac * math.pi)) / 2
+            current_norm = round((interp - mn) / rng, 3)
+            break
 
-        # Find the two hi/lo events surrounding this time
-        before = None
-        after  = None
-        for j in range(len(events) - 1):
-            m0, v0 = events[j]
-            m1, v1 = events[j+1]
-            if m0 <= target_mins <= m1:
-                before = (m0, v0)
-                after  = (m1, v1)
-                break
+    # Get next 3 hi/lo events from now
+    future_events = [(m, v, t) for m, v, t in events if m > now_mins][:3]
+    window = 24 * 60  # 24 hours in minutes
 
-        if before and after:
-            span = after[0] - before[0]
-            frac = (target_mins - before[0]) / span if span > 0 else 0
-            frac = max(0.0, min(1.0, frac))
-            # Cosine interpolation — natural tidal shape
-            interp = before[1] + (after[1] - before[1]) * (1 - math.cos(frac * math.pi)) / 2
-        else:
-            # Outside known range — use nearest endpoint
-            if target_mins < events[0][0]:
-                interp = events[0][1]
-            else:
-                interp = events[-1][1]
+    peaks = []
+    for m, v, typ in future_events:
+        mins_from_now = m - now_mins
+        time_frac = round(min(mins_from_now / window, 1.0), 3)
+        norm = round((v - mn) / rng, 3)
+        peaks.append({"time_frac": time_frac, "norm": norm, "type": typ})
 
-        norm = round((interp - mn) / rng, 3)
-        curve.append(norm)
-
-    print(f"Tide {station}: now={now_mins//60:.0f}h{now_mins%60:.0f}m curve[0]={curve[0]:.2f} curve[1]={curve[1]:.2f} events={[(int(e[0]//60),round(e[1],1)) for e in events[:6]]}")
-    return curve
+    print(f"Tide {station}: now={now_mins//60:.0f}h{now_mins%60:.0f}m current={current_norm:.2f} peaks={peaks}")
+    return {"current_norm": current_norm, "peaks": peaks}
 
 async def fetch_water_temp(client, spot):
     url = (f"https://marine-api.open-meteo.com/v1/marine"
@@ -342,7 +332,9 @@ async def get_surf(spot_id: str):
     # Tide
     tide_cur = tide_now if isinstance(tide_now, float) else 3.0
     tide_mn, tide_mx = tide_hilo if isinstance(tide_hilo, tuple) else (0.0, 6.0)
-    tide_pts = tide_curve if isinstance(tide_curve, list) else []
+    tide_data = tide_curve if isinstance(tide_curve, dict) else {}
+    tide_current_norm = tide_data.get("current_norm", 0.5)
+    tide_peaks = tide_data.get("peaks", [])
     wtemp = water_temp if isinstance(water_temp, (int,float)) else 0
 
     # Compute surf
@@ -376,7 +368,8 @@ async def get_surf(spot_id: str):
         "tide_now":     round(tide_cur, 2),
         "tide_min":     round(tide_mn, 2),
         "tide_max":     round(tide_mx, 2),
-        "tide_curve":   tide_pts,
+        "tide_current":  tide_current_norm,
+        "tide_peaks":    tide_peaks,
         "water_temp":   round(float(wtemp), 1),
         "updated":      datetime.utcnow().isoformat() + "Z",
     }
