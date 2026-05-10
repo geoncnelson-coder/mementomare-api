@@ -143,26 +143,42 @@ def cond_label(stars: int, ht: float) -> str:
 # API FETCHERS
 # ============================================================
 async def fetch_ndbc_buoy(client: httpx.AsyncClient, buoy_id: str) -> dict:
-    """Fetch latest obs from NOAA NDBC buoy — real offshore swell data"""
-    url = f"https://www.ndbc.noaa.gov/data/realtime2/{buoy_id}.txt"
-    r = await client.get(url, timeout=10)
-    r.raise_for_status()
-    lines = r.text.strip().split("\n")
-    # Line 0 = header names, Line 1 = units, Line 2+ = data (most recent first)
-    if len(lines) < 3:
+    """Fetch latest obs from NOAA NDBC buoy using their data API"""
+    try:
+        url = f"https://www.ndbc.noaa.gov/data/realtime2/{buoy_id}.txt"
+        r = await client.get(url, timeout=15)
+        r.raise_for_status()
+        lines = [l for l in r.text.strip().split("\n") if l.strip()]
+        if len(lines) < 3:
+            return {}
+        # Skip # prefix from header lines
+        headers = lines[0].lstrip("#").split()
+        data    = lines[2].split()
+        obs = {}
+        for i, h in enumerate(headers):
+            if i < len(data):
+                obs[h] = data[i]
+        def safe(key):
+            v = obs.get(key, "MM")
+            try:
+                f = float(v)
+                return f if f < 9000 else None  # 99.0/999 = missing
+            except:
+                return None
+        wvht = safe("WVHT")
+        dpd  = safe("DPD") or safe("APD")
+        mwd  = safe("MWD")
+        print(f"NDBC {buoy_id}: WVHT={wvht} DPD={dpd} MWD={mwd} raw={dict(list(obs.items())[:10])}")
+        if wvht is None:
+            return {}
+        return {
+            "wave_height":    wvht,
+            "wave_period":    dpd or 6.0,
+            "wave_direction": mwd or 270,
+        }
+    except Exception as e:
+        print(f"NDBC {buoy_id} error: {e}")
         return {}
-    headers = lines[0].split()
-    data    = lines[2].split()  # most recent observation
-    obs = dict(zip(headers, data))
-    def safe(key):
-        v = obs.get(key, "MM")
-        try: return float(v) if v != "MM" else None
-        except: return None
-    return {
-        "wave_height":    safe("WVHT"),   # meters
-        "wave_period":    safe("DPD"),    # dominant period seconds
-        "wave_direction": safe("MWD"),    # degrees
-    }
 
 async def fetch_marine(client: httpx.AsyncClient, spot: dict) -> dict:
     url = (
