@@ -142,6 +142,28 @@ def cond_label(stars: int, ht: float) -> str:
 # ============================================================
 # API FETCHERS
 # ============================================================
+async def fetch_ndbc_buoy(client: httpx.AsyncClient, buoy_id: str) -> dict:
+    """Fetch latest obs from NOAA NDBC buoy — real offshore swell data"""
+    url = f"https://www.ndbc.noaa.gov/data/realtime2/{buoy_id}.txt"
+    r = await client.get(url, timeout=10)
+    r.raise_for_status()
+    lines = r.text.strip().split("\n")
+    # Line 0 = header names, Line 1 = units, Line 2+ = data (most recent first)
+    if len(lines) < 3:
+        return {}
+    headers = lines[0].split()
+    data    = lines[2].split()  # most recent observation
+    obs = dict(zip(headers, data))
+    def safe(key):
+        v = obs.get(key, "MM")
+        try: return float(v) if v != "MM" else None
+        except: return None
+    return {
+        "wave_height":    safe("WVHT"),   # meters
+        "wave_period":    safe("DPD"),    # dominant period seconds
+        "wave_direction": safe("MWD"),    # degrees
+    }
+
 async def fetch_marine(client: httpx.AsyncClient, spot: dict) -> dict:
     url = (
         f"https://marine-api.open-meteo.com/v1/marine"
@@ -193,14 +215,17 @@ async def fetch_tide_range(client: httpx.AsyncClient, station: str) -> tuple:
     return min(vals), max(vals)
 
 async def fetch_tide_curve(client: httpx.AsyncClient, station: str) -> list:
-    """Fetch next 24 hours of hourly tide predictions from now, return normalized 0.0-1.0"""
+    """Fetch next 24 hours of hourly tide predictions from NOW forward, normalized 0-1"""
     from datetime import timezone, timedelta
     now = datetime.now(timezone.utc)
-    # Use range=24 to get the next 24 hours from current time
+    end = now + timedelta(hours=24)
+    begin_str = now.strftime("%Y%m%d %H:%M")
+    end_str   = end.strftime("%Y%m%d %H:%M")
     url = (
         f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
-        f"?range=24&station={station}&product=predictions&interval=h"
-        f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json"
+        f"?begin_date={begin_str}&end_date={end_str}"
+        f"&station={station}&product=predictions&interval=h"
+        f"&datum=MLLW&time_zone=gmt&units=english&format=json"
     )
     r = await client.get(url, timeout=10)
     r.raise_for_status()
@@ -244,17 +269,20 @@ async def get_surf(spot_id: str):
         raise HTTPException(status_code=404, detail=f"Spot '{spot_id}' not found")
 
     async with httpx.AsyncClient(verify=False) as client:
-        # Run all fetches concurrently
         marine_task      = fetch_marine(client, spot)
         wind_task        = fetch_wind(client, spot)
         tide_now_task    = fetch_tide_current(client, spot["tide_station"])
         tide_range_task  = fetch_tide_range(client, spot["tide_station"])
         tide_curve_task  = fetch_tide_curve(client, spot["tide_station"])
         water_temp_task  = fetch_water_temp(client, spot)
+        # NDBC buoy if configured
+        buoy_task = (fetch_ndbc_buoy(client, spot["ndbc_buoy"])
+                     if spot.get("ndbc_buoy") else asyncio.sleep(0))
 
         try:
-            marine, wind, tide_now, tide_range, tide_curve, water_temp = await asyncio.gather(
-                marine_task, wind_task, tide_now_task, tide_range_task, tide_curve_task, water_temp_task,
+            marine, wind, tide_now, tide_range, tide_curve, water_temp, buoy = await asyncio.gather(
+                marine_task, wind_task, tide_now_task, tide_range_task,
+                tide_curve_task, water_temp_task, buoy_task,
                 return_exceptions=True
             )
         except Exception as e:
@@ -266,19 +294,29 @@ async def get_surf(spot_id: str):
     if isinstance(wind, Exception):
         raise HTTPException(status_code=502, detail=f"Wind API error: {wind}")
 
-    # Parse marine
-    curr        = marine["current"]
-    off_h       = curr.get("wave_height") or 0.0
-    off_p       = curr.get("wave_period") or 6.0
-    off_d       = curr.get("wave_direction") or 90
+    # Parse marine — prefer NDBC buoy for Pacific spots
+    buoy_ok = (isinstance(buoy, dict) and buoy.get("wave_height") is not None)
+    if buoy_ok:
+        off_h = buoy["wave_height"]
+        off_p = buoy.get("wave_period") or 6.0
+        off_d = int(buoy.get("wave_direction") or 90)
+    else:
+        curr  = marine["current"] if isinstance(marine, dict) else {}
+        off_h = curr.get("wave_height") or 0.0
+        off_p = curr.get("wave_period") or 6.0
+        off_d = int(curr.get("wave_direction") or 90)
 
-    wh = marine["hourly"]["wave_height"]
-    wp = marine["hourly"]["wave_period"]
-    wd = marine["hourly"]["wave_direction"]
-    idx = min(33, len(wh)-1)
-    tmrw_h = wh[idx] or 0.0
-    tmrw_p = wp[idx] or 6.0
-    tmrw_d = wd[idx] or 90
+    # Tomorrow from Open-Meteo hourly (buoy is real-time only)
+    if isinstance(marine, dict) and "hourly" in marine:
+        wh = marine["hourly"]["wave_height"]
+        wp = marine["hourly"]["wave_period"]
+        wd = marine["hourly"]["wave_direction"]
+        idx = min(33, len(wh)-1)
+        tmrw_h = wh[idx] or 0.0
+        tmrw_p = wp[idx] or 6.0
+        tmrw_d = wd[idx] or 90
+    else:
+        tmrw_h = off_h; tmrw_p = off_p; tmrw_d = off_d
 
     # Parse wind
     wind_mph = wind["current"].get("wind_speed_10m") or 0.0
