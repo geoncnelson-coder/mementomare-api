@@ -260,14 +260,6 @@ async def fetch_tide_curve(client, station):
         norm = round((interp - mn) / rng, 3)
         curve.append(norm)
 
-    # Exaggerate vertical range so low tide = 0.0, high tide = 1.0 always
-    # This ensures the wave shape is always visible on the LED panel
-    if curve:
-        mn = min(curve)
-        mx = max(curve)
-        rng = mx - mn if mx - mn > 0.01 else 1.0
-        curve = [round((v - mn) / rng, 3) for v in curve]
-
     print(f"Tide {station}: now={now_mins//60:.0f}h{now_mins%60:.0f}m curve[0]={curve[0]:.2f} curve[1]={curve[1]:.2f} events={[(int(e[0]//60),round(e[1],1)) for e in events[:6]]}")
     return curve
 
