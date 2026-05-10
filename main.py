@@ -193,10 +193,13 @@ async def fetch_tide_range(client: httpx.AsyncClient, station: str) -> tuple:
     return min(vals), max(vals)
 
 async def fetch_tide_curve(client: httpx.AsyncClient, station: str) -> list:
-    """Fetch hourly tide predictions for today, return 24 normalized values 0.0-1.0"""
+    """Fetch next 24 hours of hourly tide predictions from now, return normalized 0.0-1.0"""
+    from datetime import timezone, timedelta
+    now = datetime.now(timezone.utc)
+    # Use range=24 to get the next 24 hours from current time
     url = (
         f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
-        f"?date=today&station={station}&product=predictions&interval=h"
+        f"?range=24&station={station}&product=predictions&interval=h"
         f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json"
     )
     r = await client.get(url, timeout=10)
