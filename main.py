@@ -188,9 +188,16 @@ async def fetch_marine(client: httpx.AsyncClient, spot: dict) -> dict:
         f"&hourly=wave_height,wave_period,wave_direction"
         f"&forecast_days=2&timezone=America%2FNew_York"
     )
-    r = await client.get(url, timeout=10)
-    r.raise_for_status()
-    return r.json()
+    for attempt in range(3):
+        try:
+            r = await client.get(url, timeout=15)
+            if r.status_code == 200:
+                return r.json()
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Marine fetch attempt {attempt+1} failed: {e}")
+            await asyncio.sleep(1)
+    raise Exception("Marine API failed after 3 attempts")
 
 async def fetch_wind(client: httpx.AsyncClient, spot: dict) -> dict:
     url = (
@@ -201,9 +208,18 @@ async def fetch_wind(client: httpx.AsyncClient, spot: dict) -> dict:
         f"&wind_speed_unit=mph&forecast_days=2"
         f"&timezone=America%2FNew_York"
     )
-    r = await client.get(url, timeout=10)
-    r.raise_for_status()
-    return r.json()
+    for attempt in range(3):
+        try:
+            r = await client.get(url, timeout=15)
+            if r.status_code == 200:
+                return r.json()
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Wind fetch attempt {attempt+1} failed: {e}")
+            await asyncio.sleep(1)
+    # Return safe default if all retries fail
+    return {"current": {"wind_speed_10m": 0, "wind_direction_10m": 0},
+            "hourly":  {"wind_speed_10m": [0]*48, "wind_direction_10m": [0]*48}}
 
 async def fetch_tide_current(client: httpx.AsyncClient, station: str) -> float:
     url = (
