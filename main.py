@@ -20,7 +20,7 @@ SPOTS = {
     "washout":    {"name":"WASHOUT",    "lat":32.646, "lon":-79.941,  "orientation":100, "tide_station":"8665530", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":None},
     "iop":        {"name":"IOP",        "lat":32.787, "lon":-79.771,  "orientation":95,  "tide_station":"8665530", "Ks":1.414, "near_depth":5.0, "ndbc_buoy":None},
     "huntington": {"name":"HUNTINGTON", "lat":33.654, "lon":-118.003, "orientation":270, "tide_station":"9410660", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":"46222"},
-    "blacks":     {"name":"BLACKS",     "lat":32.856, "lon":-117.253, "orientation":270, "tide_station":"9410170", "Ks":1.622, "near_depth":6.0, "ndbc_buoy":"46086"},
+    "blacks":     {"name":"BLACKS",     "lat":32.856, "lon":-117.253, "orientation":270, "tide_station":"9410170", "Ks":1.622, "near_depth":6.0, "ndbc_buoy":"46225"},
     "pipeline":   {"name":"PIPELINE",   "lat":21.665, "lon":-158.053, "orientation":330, "tide_station":"1612340", "Ks":1.778, "near_depth":2.0, "ndbc_buoy":"51201"},
 }
 
@@ -170,29 +170,83 @@ async def fetch_tide_hilo(client, station):
 
 async def fetch_tide_curve(client, station):
     """
-    Fetch hourly predictions from NOW for next 24hrs.
-    Uses explicit begin/end timestamps in UTC.
+    Build a 24-point tide curve starting from NOW using hi/lo predictions.
+    Interpolates a cosine curve between known hi/lo tide times.
+    Returns 24 normalized values 0=low 1=high.
     """
-    now = datetime.now(timezone.utc)
-    end = now + timedelta(hours=24)
-    # NOAA expects local time strings but we use GMT timezone param
-    begin_str = now.strftime("%Y%m%d %H:%M")
-    end_str   = end.strftime("%Y%m%d %H:%M")
+    from datetime import datetime as dt
+    # Fetch 2 days of hilo to cover next 24hrs regardless of timezone
     url = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
-           f"?begin_date={begin_str}&end_date={end_str}"
-           f"&station={station}&product=predictions&interval=h"
-           f"&datum=MLLW&time_zone=gmt&units=english&format=json")
+           f"?date=today&station={station}&product=predictions&interval=hilo"
+           f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
     data = await fetch_with_retry(client, url)
     if not data:
         return []
-    pts = data.get("predictions", [])
-    if not pts: return []
-    vals = [float(p["v"]) for p in pts]
-    mn, mx = min(vals), max(vals)
+    preds = data.get("predictions", [])
+    if len(preds) < 2:
+        return []
+
+    # Parse hi/lo predictions into (hour_of_day, value) pairs
+    # Use fractional hours from midnight local time
+    events = []
+    for p in preds:
+        try:
+            t_str = p["t"]  # format: "2026-05-10 06:30"
+            t = dt.strptime(t_str, "%Y-%m-%d %H:%M")
+            hour = t.hour + t.minute / 60.0
+            val  = float(p["v"])
+            events.append((hour, val))
+        except:
+            pass
+
+    if len(events) < 2:
+        return []
+
+    # Get current hour
+    now_hour = datetime.now(timezone.utc).hour  # approximate local
+    # Adjust for EST (UTC-5) / EDT (UTC-4) — Charleston is EDT
+    now_local = (datetime.now(timezone.utc).hour - 4) % 24
+    now_frac  = now_local + datetime.now(timezone.utc).minute / 60.0
+
+    # Get overall min/max for normalization
+    all_vals = [e[1] for e in events]
+    mn, mx = min(all_vals), max(all_vals)
     rng = mx - mn if mx - mn > 0.1 else 1.0
-    normalized = [round((v - mn) / rng, 3) for v in vals]
-    print(f"Tide curve {station}: {len(normalized)} pts, first={normalized[0]:.2f} last={normalized[-1]:.2f}")
-    return normalized
+
+    # Build 24 hourly points starting from now
+    curve = []
+    for i in range(24):
+        target_hour = (now_frac + i) % 24
+
+        # Find surrounding hi/lo events
+        # Extend events list to handle wraparound
+        ext_events = events + [(e[0]+24, e[1]) for e in events]
+        before = None
+        after  = None
+        for j in range(len(ext_events)-1):
+            h0, v0 = ext_events[j]
+            h1, v1 = ext_events[j+1]
+            th = target_hour if target_hour >= h0 else target_hour + 24
+            if h0 <= th <= h1:
+                before = (h0, v0)
+                after  = (h1, v1)
+                break
+
+        if before and after:
+            # Cosine interpolation between hi/lo
+            span = after[0] - before[0]
+            frac = (target_hour - before[0]) / span if span > 0 else 0
+            frac = max(0, min(1, frac))
+            # Cosine gives natural tide curve shape
+            interp = before[1] + (after[1] - before[1]) * (1 - math.cos(frac * math.pi)) / 2
+        else:
+            interp = (mn + mx) / 2
+
+        norm = round((interp - mn) / rng, 3)
+        curve.append(norm)
+
+    print(f"Tide curve {station}: {len(curve)} pts, first={curve[0]:.2f} last={curve[-1]:.2f} now_local={now_local:.1f}h")
+    return curve
 
 async def fetch_water_temp(client, spot):
     url = (f"https://marine-api.open-meteo.com/v1/marine"
