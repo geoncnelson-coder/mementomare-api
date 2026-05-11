@@ -186,6 +186,7 @@ async def fetch_tide_curve(client, station):
     url1 = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
             f"?date=today&station={station}&product=predictions&interval=hilo"
             f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
+    # Also fetch day after tomorrow to ensure we have 4 future peaks
     url2 = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
             f"?date=tomorrow&station={station}&product=predictions&interval=hilo"
             f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
@@ -239,14 +240,14 @@ async def fetch_tide_curve(client, station):
             current_norm = round((interp - mn) / rng, 3)
             break
 
-    # Get next 3 hi/lo events from now
-    future_events = [(m, v, t) for m, v, t in events if m > now_mins][:3]
+    # Get next 4 hi/lo events from now (need enough to fill 24hr window)
+    future_events = [(m, v, t) for m, v, t in events if m > now_mins][:4]
     window = 24 * 60  # 24 hours in minutes
 
     peaks = []
     for m, v, typ in future_events:
         mins_from_now = m - now_mins
-        time_frac = round(min(mins_from_now / window, 1.0), 3)
+        time_frac = round(mins_from_now / window, 3)  # can exceed 1.0, ESP32 clips to panel width
         norm = round((v - mn) / rng, 3)
         peaks.append({"time_frac": time_frac, "norm": norm, "type": typ})
 
