@@ -248,22 +248,11 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
             current_norm = round((interp - mn) / rng, 3)
             break
 
-    # Get last past peak as anchor + next 4 future peaks
-    past_events   = [(m, v, t) for m, v, t in events if m <= now_mins]
     future_events = [(m, v, t) for m, v, t in events if m > now_mins][:5]
     window = 24 * 60  # 24 hours in minutes
 
-    peaks = []
-
-    # Add last past peak ONLY if it was more than 2 hours ago
-    # If recent, current position already captures the shape correctly
-    if past_events:
-        m, v, typ = past_events[-1]
-        mins_from_now = m - now_mins  # negative
-        if mins_from_now < -120:  # more than 2 hours ago
-            time_frac = round(mins_from_now / window, 3)
-            norm_val = round((v - mn) / rng, 3)
-            peaks.append({"time_frac": time_frac, "norm": norm_val, "type": typ})
+    # Always start with current position at time_frac=0
+    peaks = [{"time_frac": 0.0, "norm": round(current_norm, 3), "type": "C"}]
 
     # Add future peaks
     for m, v, typ in future_events:
@@ -271,8 +260,6 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
         time_frac = round(mins_from_now / window, 3)
         norm_val = round((v - mn) / rng, 3)
         peaks.append({"time_frac": time_frac, "norm": norm_val, "type": typ})
-
-    print(f"Tide {station}: now={now_mins//60:.0f}h{now_mins%60:.0f}m current={current_norm:.2f} peaks={peaks}")
     return {"current_norm": current_norm, "peaks": peaks}
 
 async def fetch_water_temp(client, spot):
