@@ -184,11 +184,11 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
 
     # Fetch today + tomorrow hilo
     from datetime import datetime as dt2
-    now_utc = datetime.now(timezone.utc)
-    now_edt = now_utc - timedelta(hours=4)
-    today_str    = now_edt.strftime("%Y%m%d")
-    tomorrow_str = (now_edt + timedelta(days=1)).strftime("%Y%m%d")
-    day3_str     = (now_edt + timedelta(days=2)).strftime("%Y%m%d")
+    now_utc   = datetime.now(timezone.utc)
+    now_local = now_utc + timedelta(hours=tz_offset)
+    today_str    = now_local.strftime("%Y%m%d")
+    tomorrow_str = (now_local + timedelta(days=1)).strftime("%Y%m%d")
+    day3_str     = (now_local + timedelta(days=2)).strftime("%Y%m%d")
 
     url1 = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
             f"?begin_date={today_str}&end_date={tomorrow_str}"
@@ -209,9 +209,9 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
     if isinstance(data2, dict): preds += data2.get("predictions", [])
     if len(preds) < 2: return []
 
-    # Current local time (EDT = UTC-4)
+    # Current local time using spot timezone
     now_utc   = datetime.now(timezone.utc)
-    now_local = now_utc - timedelta(hours=4)
+    now_local = now_utc + timedelta(hours=tz_offset)
     now_mins  = now_local.hour * 60 + now_local.minute
     today     = now_local.date()
 
@@ -250,14 +250,37 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
 
     past_events   = [(m, v, t) for m, v, t in events if m <= now_mins]
     future_events = [(m, v, t) for m, v, t in events if m > now_mins][:5]
-    window = 24 * 60  # 24 hours in minutes
+    window = 24 * 60
 
     peaks = []
 
-    # Add the most recent past peak — tells us if rising or falling
+    # Calculate what the cosine value is at x=0 (left edge of panel)
+    # x=0 is NOW_X=6 pixels before current, which is 6/57 = 0.105 time units before now
+    # We need the y value at that point from the segment (past_peak -> current)
     if past_events:
-        m, v, typ = past_events[-1]
-        mins_from_now = m - now_mins  # negative number
+        m_past, v_past, _ = past_events[-1]
+        mins_past = m_past - now_mins  # negative
+        # time_frac of x=0: x=0 is NOW_X pixels left of NOW_X
+        # time_frac = -NOW_X / (PANEL_W - NOW_X - 1) = -6/57 = -0.105
+        tf_zero = -6.0 / 57.0
+        tf_past = mins_past / window
+        tf_curr = 0.0
+        # Cosine interp between past peak and current at tf_zero
+        span = tf_curr - tf_past
+        if span > 0.001:
+            frac = (tf_zero - tf_past) / span
+            frac = max(0.0, min(1.0, frac))
+            v_curr_norm = current_norm
+            v_past_norm = (v_past - mn) / rng
+            y_at_zero = v_past_norm + (v_curr_norm - v_past_norm) * (1 - math.cos(frac * math.pi)) / 2
+            peaks.append({"time_frac": round(tf_zero, 3), "norm": round(y_at_zero, 3), "type": "S"})
+
+    # Current position at time_frac=0 (x=NOW_X=6)
+    peaks.append({"time_frac": 0.0, "norm": round(current_norm, 3), "type": "C"})
+
+    # Future peaks
+    for m, v, typ in future_events:
+        mins_from_now = m - now_mins
         time_frac = round(mins_from_now / window, 3)
         norm_val = round((v - mn) / rng, 3)
         peaks.append({"time_frac": time_frac, "norm": norm_val, "type": typ})
