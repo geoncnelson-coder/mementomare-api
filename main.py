@@ -248,16 +248,27 @@ async def fetch_tide_curve(client, station):
             current_norm = round((interp - mn) / rng, 3)
             break
 
-    # Get next 4 hi/lo events from now (need enough to fill 24hr window)
+    # Get last past peak as anchor + next 4 future peaks
+    past_events   = [(m, v, t) for m, v, t in events if m <= now_mins]
     future_events = [(m, v, t) for m, v, t in events if m > now_mins][:4]
     window = 24 * 60  # 24 hours in minutes
 
     peaks = []
+
+    # Add last past peak with negative time_frac (before now)
+    if past_events:
+        m, v, typ = past_events[-1]
+        mins_from_now = m - now_mins  # negative
+        time_frac = round(mins_from_now / window, 3)
+        norm_val = round((v - mn) / rng, 3)
+        peaks.append({"time_frac": time_frac, "norm": norm_val, "type": typ})
+
+    # Add future peaks
     for m, v, typ in future_events:
         mins_from_now = m - now_mins
-        time_frac = round(mins_from_now / window, 3)  # can exceed 1.0, ESP32 clips to panel width
-        norm = round((v - mn) / rng, 3)
-        peaks.append({"time_frac": time_frac, "norm": norm, "type": typ})
+        time_frac = round(mins_from_now / window, 3)
+        norm_val = round((v - mn) / rng, 3)
+        peaks.append({"time_frac": time_frac, "norm": norm_val, "type": typ})
 
     print(f"Tide {station}: now={now_mins//60:.0f}h{now_mins%60:.0f}m current={current_norm:.2f} peaks={peaks}")
     return {"current_norm": current_norm, "peaks": peaks}
