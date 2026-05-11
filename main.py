@@ -250,7 +250,7 @@ async def fetch_tide_curve(client, station):
 
     # Get last past peak as anchor + next 4 future peaks
     past_events   = [(m, v, t) for m, v, t in events if m <= now_mins]
-    future_events = [(m, v, t) for m, v, t in events if m > now_mins][:4]
+    future_events = [(m, v, t) for m, v, t in events if m > now_mins][:5]
     window = 24 * 60  # 24 hours in minutes
 
     peaks = []
