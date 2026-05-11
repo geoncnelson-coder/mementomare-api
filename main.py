@@ -183,12 +183,20 @@ async def fetch_tide_curve(client, station):
     from datetime import datetime as dt
 
     # Fetch today + tomorrow hilo
+    from datetime import datetime as dt2
+    now_utc = datetime.now(timezone.utc)
+    now_edt = now_utc - timedelta(hours=4)
+    today_str    = now_edt.strftime("%Y%m%d")
+    tomorrow_str = (now_edt + timedelta(days=1)).strftime("%Y%m%d")
+    day3_str     = (now_edt + timedelta(days=2)).strftime("%Y%m%d")
+
     url1 = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
-            f"?date=today&station={station}&product=predictions&interval=hilo"
+            f"?begin_date={today_str}&end_date={tomorrow_str}"
+            f"&station={station}&product=predictions&interval=hilo"
             f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
-    # Also fetch day after tomorrow to ensure we have 4 future peaks
     url2 = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
-            f"?date=tomorrow&station={station}&product=predictions&interval=hilo"
+            f"?begin_date={tomorrow_str}&end_date={day3_str}"
+            f"&station={station}&product=predictions&interval=hilo"
             f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
     data1, data2 = await asyncio.gather(
         fetch_with_retry(client, url1),
