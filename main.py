@@ -248,13 +248,24 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
             current_norm = round((interp - mn) / rng, 3)
             break
 
+    past_events   = [(m, v, t) for m, v, t in events if m <= now_mins]
     future_events = [(m, v, t) for m, v, t in events if m > now_mins][:5]
     window = 24 * 60  # 24 hours in minutes
 
-    # Always start with current position at time_frac=0
-    peaks = [{"time_frac": 0.0, "norm": round(current_norm, 3), "type": "C"}]
+    peaks = []
 
-    # Add future peaks
+    # Add the most recent past peak — tells us if rising or falling
+    if past_events:
+        m, v, typ = past_events[-1]
+        mins_from_now = m - now_mins  # negative number
+        time_frac = round(mins_from_now / window, 3)
+        norm_val = round((v - mn) / rng, 3)
+        peaks.append({"time_frac": time_frac, "norm": norm_val, "type": typ})
+
+    # Add current position at time_frac=0
+    peaks.append({"time_frac": 0.0, "norm": round(current_norm, 3), "type": "C"})
+
+    # Add next 5 future peaks
     for m, v, typ in future_events:
         mins_from_now = m - now_mins
         time_frac = round(mins_from_now / window, 3)
