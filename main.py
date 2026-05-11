@@ -17,11 +17,11 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # SPOTS
 # ============================================================
 SPOTS = {
-    "washout":    {"name":"WASHOUT",    "lat":32.646, "lon":-79.941,  "orientation":100, "tide_station":"8665530", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":None},
-    "iop":        {"name":"IOP",        "lat":32.787, "lon":-79.771,  "orientation":95,  "tide_station":"8665530", "Ks":1.414, "near_depth":5.0, "ndbc_buoy":None},
-    "huntington": {"name":"HUNTINGTON", "lat":33.654, "lon":-118.003, "orientation":270, "tide_station":"9410660", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":"46222"},
-    "blacks":     {"name":"BLACKS",     "lat":32.856, "lon":-117.253, "orientation":270, "tide_station":"9410170", "Ks":1.622, "near_depth":6.0, "ndbc_buoy":"46225"},
-    "pipeline":   {"name":"PIPELINE",   "lat":21.665, "lon":-158.053, "orientation":330, "tide_station":"1612340", "Ks":1.778, "near_depth":2.0, "ndbc_buoy":"51201"},
+    "washout":    {"name":"WASHOUT",    "lat":32.646, "lon":-79.941,  "orientation":100, "tide_station":"8665530", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":None,    "tz_offset":-4},
+    "iop":        {"name":"IOP",        "lat":32.787, "lon":-79.771,  "orientation":95,  "tide_station":"8665530", "Ks":1.414, "near_depth":5.0, "ndbc_buoy":None,    "tz_offset":-4},
+    "huntington": {"name":"HUNTINGTON", "lat":33.654, "lon":-118.003, "orientation":270, "tide_station":"9410660", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":"46222", "tz_offset":-7},
+    "blacks":     {"name":"BLACKS",     "lat":32.856, "lon":-117.253, "orientation":270, "tide_station":"9410170", "Ks":1.622, "near_depth":6.0, "ndbc_buoy":"46225", "tz_offset":-7},
+    "pipeline":   {"name":"PIPELINE",   "lat":21.665, "lon":-158.053, "orientation":330, "tide_station":"1612340", "Ks":1.778, "near_depth":2.0, "ndbc_buoy":"51201", "tz_offset":-10},
 }
 
 # ============================================================
@@ -168,7 +168,7 @@ async def fetch_tide_hilo(client, station):
     vals = [float(p["v"]) for p in data.get("predictions",[])]
     return (min(vals), max(vals)) if vals else (0.0, 6.0)
 
-async def fetch_tide_curve(client, station):
+async def fetch_tide_curve(client, station, tz_offset=-4):
     """
     Returns tide data for the ESP32 to plot:
     - current_norm: current tide height normalized 0-1
@@ -255,13 +255,15 @@ async def fetch_tide_curve(client, station):
 
     peaks = []
 
-    # Add last past peak with negative time_frac (before now)
+    # Add last past peak ONLY if it was more than 2 hours ago
+    # If recent, current position already captures the shape correctly
     if past_events:
         m, v, typ = past_events[-1]
         mins_from_now = m - now_mins  # negative
-        time_frac = round(mins_from_now / window, 3)
-        norm_val = round((v - mn) / rng, 3)
-        peaks.append({"time_frac": time_frac, "norm": norm_val, "type": typ})
+        if mins_from_now < -120:  # more than 2 hours ago
+            time_frac = round(mins_from_now / window, 3)
+            norm_val = round((v - mn) / rng, 3)
+            peaks.append({"time_frac": time_frac, "norm": norm_val, "type": typ})
 
     # Add future peaks
     for m, v, typ in future_events:
@@ -304,7 +306,7 @@ async def get_surf(spot_id: str):
             fetch_wind(client, spot),
             fetch_tide_now(client, spot["tide_station"]),
             fetch_tide_hilo(client, spot["tide_station"]),
-            fetch_tide_curve(client, spot["tide_station"]),
+            fetch_tide_curve(client, spot["tide_station"], spot.get("tz_offset", -4)),
             fetch_water_temp(client, spot),
             fetch_ndbc(client, spot["ndbc_buoy"]) if spot["ndbc_buoy"] else asyncio.sleep(0),
             return_exceptions=True
