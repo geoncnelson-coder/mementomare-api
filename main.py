@@ -170,22 +170,29 @@ async def fetch_tide_hilo(client, station):
 
 async def fetch_tide_curve(client, station, tz_offset=-4):
     """
-    Returns tide data for the ESP32 to plot:
-    - current_norm: current tide height normalized 0-1
-    - peaks: list of next 3 hi/lo events as {time_frac, norm, type}
-      time_frac = 0.0 (now) to 1.0 (24hrs from now)
-      norm = 0.0 (day low) to 1.0 (day high)
-    ESP32 will:
-    - Plot current at x=6 (10% from left)
-    - Plot next 3 peaks at their time_frac x positions
-    - Cosine interpolate between all points
+    Returns tide data for plotting as (time, elevation) graph:
+    - window: -1hr to +24hr from now (25hr window)
+    - y_min: floor of lowest low tide in window
+    - y_max: ceil of highest high tide in window
+    - points: list of {x_frac, y_norm} for each hi/lo event in window
+      x_frac: 0.0 = left edge (-1hr), 1.0 = right edge (+24hr)
+      y_norm: 0.0 = y_min, 1.0 = y_max
+    - now_x_frac: where "now" sits on the x axis = 1/25 = 0.04
+    - current_y_norm: current tide height normalized
     """
     from datetime import datetime as dt
 
-    # Fetch today + tomorrow hilo
-    from datetime import datetime as dt2
     now_utc   = datetime.now(timezone.utc)
     now_local = now_utc + timedelta(hours=tz_offset)
+    today     = now_local.date()
+    now_mins  = now_local.hour * 60 + now_local.minute
+
+    # Window: -60 mins to +24*60 mins from now
+    win_start = now_mins - 60
+    win_end   = now_mins + 24 * 60
+    win_span  = 25 * 60  # total window in minutes
+
+    # Fetch today + tomorrow + day after hilo predictions
     today_str    = now_local.strftime("%Y%m%d")
     tomorrow_str = (now_local + timedelta(days=1)).strftime("%Y%m%d")
     day3_str     = (now_local + timedelta(days=2)).strftime("%Y%m%d")
@@ -198,6 +205,7 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
             f"?begin_date={tomorrow_str}&end_date={day3_str}"
             f"&station={station}&product=predictions&interval=hilo"
             f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
+
     data1, data2 = await asyncio.gather(
         fetch_with_retry(client, url1),
         fetch_with_retry(client, url2),
@@ -207,15 +215,9 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
     preds = []
     if isinstance(data1, dict): preds += data1.get("predictions", [])
     if isinstance(data2, dict): preds += data2.get("predictions", [])
-    if len(preds) < 2: return []
+    if len(preds) < 2: return {}
 
-    # Current local time using spot timezone
-    now_utc   = datetime.now(timezone.utc)
-    now_local = now_utc + timedelta(hours=tz_offset)
-    now_mins  = now_local.hour * 60 + now_local.minute
-    today     = now_local.date()
-
-    # Parse all events into minutes-since-midnight-today, deduplicated
+    # Parse all events into minutes-since-midnight-today
     events = []
     for p in preds:
         try:
@@ -223,78 +225,62 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
             delta_days = (t.date() - today).days
             mins = delta_days * 1440 + t.hour * 60 + t.minute
             val  = float(p["v"])
+            typ  = p.get("type", "H")
             if not any(abs(e[0] - mins) < 5 for e in events):
-                events.append((mins, val, p.get("type","H")))
+                events.append((mins, val, typ))
         except:
             pass
     events.sort(key=lambda x: x[0])
 
-    if len(events) < 2: return []
+    if len(events) < 2: return {}
 
-    # Overall min/max for normalization
-    all_vals = [e[1] for e in events]
-    mn, mx = min(all_vals), max(all_vals)
-    rng = mx - mn if mx - mn > 0.1 else 1.0
+    # Get all events in our window (plus one before and one after for curve continuity)
+    window_events = []
+    for i, (m, v, t) in enumerate(events):
+        if win_start - 120 <= m <= win_end + 120:
+            window_events.append((m, v, t))
 
-    # Get current tide height via cosine interpolation between surrounding events
-    current_norm = 0.5
+    if len(window_events) < 2: return {}
+
+    # Y axis: floor of lowest low, ceil of highest high in window
+    window_vals = [v for _, v, _ in window_events]
+    y_min = math.floor(min(window_vals))
+    y_max = math.ceil(max(window_vals))
+    y_range = y_max - y_min if y_max > y_min else 1.0
+
+    # Current tide via cosine interpolation
+    current_val = y_min + (y_max - y_min) / 2  # fallback
     for i in range(len(events)-1):
         m0, v0, _ = events[i]
         m1, v1, _ = events[i+1]
         if m0 <= now_mins <= m1:
             span = m1 - m0
             frac = (now_mins - m0) / span if span > 0 else 0
-            interp = v0 + (v1 - v0) * (1 - math.cos(frac * math.pi)) / 2
-            current_norm = round((interp - mn) / rng, 3)
+            current_val = v0 + (v1 - v0) * (1 - math.cos(frac * math.pi)) / 2
             break
 
-    past_events   = [(m, v, t) for m, v, t in events if m <= now_mins]
-    future_events = [(m, v, t) for m, v, t in events if m > now_mins][:5]
-    window = 24 * 60
+    # Build points list — all events in window as x_frac, y_norm
+    points = []
+    for m, v, typ in window_events:
+        x_frac = (m - win_start) / win_span  # 0=left edge, 1=right edge
+        y_norm = (v - y_min) / y_range
+        points.append({
+            "x": round(x_frac, 4),
+            "y": round(y_norm, 4),
+            "type": typ
+        })
 
-    peaks = []
+    now_x_frac     = (now_mins - win_start) / win_span  # should be ~0.04
+    current_y_norm = (current_val - y_min) / y_range
 
-    # Calculate what the cosine value is at x=0 (left edge of panel)
-    # x=0 is NOW_X=6 pixels before current, which is 6/57 = 0.105 time units before now
-    # We need the y value at that point from the segment (past_peak -> current)
-    if past_events:
-        m_past, v_past, _ = past_events[-1]
-        mins_past = m_past - now_mins  # negative
-        # time_frac of x=0: x=0 is NOW_X pixels left of NOW_X
-        # time_frac = -NOW_X / (PANEL_W - NOW_X - 1) = -6/57 = -0.105
-        tf_zero = -6.0 / 57.0
-        tf_past = mins_past / window
-        tf_curr = 0.0
-        # Cosine interp between past peak and current at tf_zero
-        span = tf_curr - tf_past
-        if span > 0.001:
-            frac = (tf_zero - tf_past) / span
-            frac = max(0.0, min(1.0, frac))
-            v_curr_norm = current_norm
-            v_past_norm = (v_past - mn) / rng
-            y_at_zero = v_past_norm + (v_curr_norm - v_past_norm) * (1 - math.cos(frac * math.pi)) / 2
-            peaks.append({"time_frac": round(tf_zero, 3), "norm": round(y_at_zero, 3), "type": "S"})
-
-    # Current position at time_frac=0 (x=NOW_X=6)
-    peaks.append({"time_frac": 0.0, "norm": round(current_norm, 3), "type": "C"})
-
-    # Future peaks
-    for m, v, typ in future_events:
-        mins_from_now = m - now_mins
-        time_frac = round(mins_from_now / window, 3)
-        norm_val = round((v - mn) / rng, 3)
-        peaks.append({"time_frac": time_frac, "norm": norm_val, "type": typ})
-
-    # Add current position at time_frac=0
-    peaks.append({"time_frac": 0.0, "norm": round(current_norm, 3), "type": "C"})
-
-    # Add next 5 future peaks
-    for m, v, typ in future_events:
-        mins_from_now = m - now_mins
-        time_frac = round(mins_from_now / window, 3)
-        norm_val = round((v - mn) / rng, 3)
-        peaks.append({"time_frac": time_frac, "norm": norm_val, "type": typ})
-    return {"current_norm": current_norm, "peaks": peaks}
+    print(f"Tide {station}: y={y_min}-{y_max}ft, {len(points)} pts, now_x={now_x_frac:.3f}, current_y={current_y_norm:.3f}")
+    return {
+        "points":          points,
+        "now_x":           round(now_x_frac, 4),
+        "current_y":       round(current_y_norm, 4),
+        "y_min":           y_min,
+        "y_max":           y_max,
+    }
 
 async def fetch_water_temp(client, spot):
     url = (f"https://marine-api.open-meteo.com/v1/marine"
@@ -375,9 +361,12 @@ async def get_surf(spot_id: str):
     # Tide
     tide_cur = tide_now if isinstance(tide_now, float) else 3.0
     tide_mn, tide_mx = tide_hilo if isinstance(tide_hilo, tuple) else (0.0, 6.0)
-    tide_data = tide_curve if isinstance(tide_curve, dict) else {}
-    tide_current_norm = tide_data.get("current_norm", 0.5)
-    tide_peaks = tide_data.get("peaks", [])
+    tide_data      = tide_curve if isinstance(tide_curve, dict) else {}
+    tide_points    = tide_data.get("points", [])
+    tide_now_x     = tide_data.get("now_x", 0.04)
+    tide_current_y = tide_data.get("current_y", 0.5)
+    tide_y_min     = tide_data.get("y_min", 0)
+    tide_y_max     = tide_data.get("y_max", 6)
     wtemp = water_temp if isinstance(water_temp, (int,float)) else 0
 
     # Compute surf
@@ -411,8 +400,11 @@ async def get_surf(spot_id: str):
         "tide_now":     round(tide_cur, 2),
         "tide_min":     round(tide_mn, 2),
         "tide_max":     round(tide_mx, 2),
-        "tide_current":  tide_current_norm,
-        "tide_peaks":    tide_peaks,
+        "tide_points":   tide_points,
+        "tide_now_x":    tide_now_x,
+        "tide_current_y": tide_current_y,
+        "tide_y_min":    tide_y_min,
+        "tide_y_max":    tide_y_max,
         "water_temp":   round(float(wtemp), 1),
         "updated":      datetime.utcnow().isoformat() + "Z",
     }
