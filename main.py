@@ -264,9 +264,14 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
 
     # Y axis: floor of lowest low, ceil of highest high in window
     window_vals = [v for _, v, _ in window_events]
-    y_min = -1.0  # fixed floor
-    y_max = 7.0   # fixed ceiling
-    y_range = y_max - y_min  # always 8.0
+    # Dynamic y range based on actual tides in window
+    # Add 20% padding above and below for visual breathing room
+    raw_min = min(window_vals)
+    raw_max = max(window_vals)
+    padding = max((raw_max - raw_min) * 0.2, 0.3)
+    y_min = raw_min - padding
+    y_max = raw_max + padding
+    y_range = y_max - y_min
 
     # Current tide via cosine interpolation
     current_val = y_min + (y_max - y_min) / 2  # fallback
