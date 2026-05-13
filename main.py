@@ -197,6 +197,7 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
     today_str    = now_local.strftime("%Y%m%d")
     tomorrow_str = (now_local + timedelta(days=1)).strftime("%Y%m%d")
     day3_str     = (now_local + timedelta(days=2)).strftime("%Y%m%d")
+    day4_str     = (now_local + timedelta(days=3)).strftime("%Y%m%d")
 
     url1 = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
             f"?begin_date={today_str}&end_date={tomorrow_str}"
@@ -206,16 +207,22 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
             f"?begin_date={tomorrow_str}&end_date={day3_str}"
             f"&station={station}&product=predictions&interval=hilo"
             f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
+    url3 = (f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+            f"?begin_date={day3_str}&end_date={day4_str}"
+            f"&station={station}&product=predictions&interval=hilo"
+            f"&datum=MLLW&time_zone=lst_ldt&units=english&format=json")
 
-    data1, data2 = await asyncio.gather(
+    data1, data2, data3 = await asyncio.gather(
         fetch_with_retry(client, url1),
         fetch_with_retry(client, url2),
+        fetch_with_retry(client, url3),
         return_exceptions=True
     )
 
     preds = []
     if isinstance(data1, dict): preds += data1.get("predictions", [])
     if isinstance(data2, dict): preds += data2.get("predictions", [])
+    if isinstance(data3, dict): preds += data3.get("predictions", [])
     if len(preds) < 2: return {}
 
     # Parse all events into minutes-since-midnight-today
@@ -264,7 +271,7 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
     points = []
     for m, v, typ in window_events:
         x_frac = (m - win_start) / win_span  # 0=left edge, 1=right edge
-        y_norm = (v - y_min) / y_range
+        y_norm = max(0.0, min(1.0, (v - y_min) / y_range))
         points.append({
             "x": round(x_frac, 4),
             "y": round(y_norm, 4),
