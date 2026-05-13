@@ -243,19 +243,30 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
 
     if len(events) < 2: return {}
 
-    # Get all events in our window (plus one before and one after for curve continuity)
+    # Get events in window PLUS one before and one after for curve continuity
     window_events = []
+    before = None
+    after  = None
     for i, (m, v, t) in enumerate(events):
-        if win_start - 120 <= m <= win_end + 120:
+        if m < win_start:
+            before = (m, v, t)  # keep updating — we want the last one before window
+        elif m <= win_end:
             window_events.append((m, v, t))
+        elif after is None:
+            after = (m, v, t)  # first event after window
+
+    if before:
+        window_events.insert(0, before)
+    if after:
+        window_events.append(after)
 
     if len(window_events) < 2: return {}
 
     # Y axis: floor of lowest low, ceil of highest high in window
     window_vals = [v for _, v, _ in window_events]
-    y_min = -5.0  # fixed floor so negatives never cause issues
-    y_max = math.ceil(max(window_vals))
-    y_range = y_max - y_min if y_max > y_min else 1.0
+    y_min = -1.0  # fixed floor
+    y_max = 7.0   # fixed ceiling
+    y_range = y_max - y_min  # always 8.0
 
     # Current tide via cosine interpolation
     current_val = y_min + (y_max - y_min) / 2  # fallback
@@ -268,27 +279,44 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
             current_val = v0 + (v1 - v0) * (1 - math.cos(frac * math.pi)) / 2
             break
 
-    # Build points list — all events in window as x_frac, y_norm
-    points = []
-    for m, v, typ in window_events:
-        x_frac = (m - win_start) / win_span  # 0=left edge, 1=right edge
-        y_norm = max(0.0, min(1.0, (v - y_min) / y_range))
-        points.append({
-            "x": round(x_frac, 4),
-            "y": round(y_norm, 4),
-            "type": typ
-        })
+    # Pre-compute tide height for each of 64 pixels
+    # Each pixel = win_span/64 minutes
+    mins_per_px = win_span / 64
+    curve = []
+    for px in range(64):
+        t_mins = win_start + px * mins_per_px  # absolute minutes since midnight
 
-    now_x_frac     = 90 / win_span  # 1.5hrs / 18hrs = 0.0833 always
-    current_y_norm = (current_val - y_min) / y_range
+        # Find surrounding hi/lo events and cosine interpolate
+        val = current_val  # fallback
+        for i in range(len(events)-1):
+            m0, v0, _ = events[i]
+            m1, v1, _ = events[i+1]
+            if m0 <= t_mins <= m1:
+                span = m1 - m0
+                frac = (t_mins - m0) / span if span > 0 else 0
+                val = v0 + (v1 - v0) * (1 - math.cos(frac * math.pi)) / 2
+                break
+        else:
+            # Outside all events — use nearest endpoint
+            if t_mins < events[0][0]:
+                val = events[0][1]
+            else:
+                val = events[-1][1]
 
-    print(f"Tide {station}: y={y_min}-{y_max}ft, {len(points)} pts, now_x={now_x_frac:.3f}, current_y={current_y_norm:.3f}")
+        y_norm = max(0.0, min(1.0, (val - y_min) / y_range))
+        curve.append(round(y_norm, 4))
+
+    now_x_frac     = 90 / win_span  # always 0.0833
+    current_y_norm = max(0.0, min(1.0, (current_val - y_min) / y_range))
+    now_px         = round(now_x_frac * 63)  # pixel index of now (~5)
+
+    print(f"Tide {station}: y={y_min}-{y_max}ft now_px={now_px} curve[{now_px}]={curve[now_px]:.3f}")
     return {
-        "points":          points,
-        "now_x":           round(now_x_frac, 4),
-        "current_y":       round(current_y_norm, 4),
-        "y_min":           y_min,
-        "y_max":           y_max,
+        "curve":      curve,       # 64 pre-computed normalized values
+        "now_px":     now_px,      # pixel index of now
+        "current_y":  round(current_y_norm, 4),
+        "y_min":      y_min,
+        "y_max":      y_max,
     }
 
 async def fetch_water_temp(client, spot):
@@ -371,11 +399,11 @@ async def get_surf(spot_id: str):
     tide_cur = tide_now if isinstance(tide_now, float) else 3.0
     tide_mn, tide_mx = tide_hilo if isinstance(tide_hilo, tuple) else (0.0, 6.0)
     tide_data      = tide_curve if isinstance(tide_curve, dict) else {}
-    tide_points    = tide_data.get("points", [])
-    tide_now_x     = tide_data.get("now_x", 0.04)
+    tide_curve_arr = tide_data.get("curve", [])
+    tide_now_px    = tide_data.get("now_px", 5)
     tide_current_y = tide_data.get("current_y", 0.5)
-    tide_y_min     = tide_data.get("y_min", 0)
-    tide_y_max     = tide_data.get("y_max", 6)
+    tide_y_min     = tide_data.get("y_min", -1)
+    tide_y_max     = tide_data.get("y_max", 7)
     wtemp = water_temp if isinstance(water_temp, (int,float)) else 0
 
     # Compute surf
@@ -409,8 +437,8 @@ async def get_surf(spot_id: str):
         "tide_now":     round(tide_cur, 2),
         "tide_min":     round(tide_mn, 2),
         "tide_max":     round(tide_mx, 2),
-        "tide_points":   tide_points,
-        "tide_now_x":    tide_now_x,
+        "tide_curve":    tide_curve_arr,
+        "tide_now_px":   tide_now_px,
         "tide_current_y": tide_current_y,
         "tide_y_min":    tide_y_min,
         "tide_y_max":    tide_y_max,
