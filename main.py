@@ -223,6 +223,7 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
     if isinstance(data1, dict): preds += data1.get("predictions", [])
     if isinstance(data2, dict): preds += data2.get("predictions", [])
     if isinstance(data3, dict): preds += data3.get("predictions", [])
+    print(f"Tide preds fetched: {len(preds)} total events")
     if len(preds) < 2: return {}
 
     # Parse all events into minutes-since-midnight-today
@@ -252,7 +253,7 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
 
     # Y axis: floor of lowest low, ceil of highest high in window
     window_vals = [v for _, v, _ in window_events]
-    y_min = max(0, math.floor(min(window_vals)))
+    y_min = -5.0  # fixed floor so negatives never cause issues
     y_max = math.ceil(max(window_vals))
     y_range = y_max - y_min if y_max > y_min else 1.0
 
