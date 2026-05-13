@@ -17,8 +17,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # SPOTS
 # ============================================================
 SPOTS = {
-    "washout":    {"name":"WASHOUT",    "lat":32.646, "lon":-79.941,  "orientation":100, "tide_station":"8665530", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":None,    "tz_offset":-4},
-    "iop":        {"name":"IOP",        "lat":32.787, "lon":-79.771,  "orientation":95,  "tide_station":"8665530", "Ks":1.414, "near_depth":5.0, "ndbc_buoy":None,    "tz_offset":-4},
+    "washout":    {"name":"WASHOUT",    "lat":32.646, "lon":-79.941,  "orientation":100, "tide_station":"8666467", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":None,    "tz_offset":-4},
+    "iop":        {"name":"IOP",        "lat":32.787, "lon":-79.771,  "orientation":95,  "tide_station":"8666467", "Ks":1.414, "near_depth":5.0, "ndbc_buoy":None,    "tz_offset":-4},
     "huntington": {"name":"HUNTINGTON", "lat":33.654, "lon":-118.003, "orientation":270, "tide_station":"9410660", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":"46222", "tz_offset":-7},
     "blacks":     {"name":"BLACKS",     "lat":32.856, "lon":-117.253, "orientation":270, "tide_station":"9410170", "Ks":1.622, "near_depth":6.0, "ndbc_buoy":"46225", "tz_offset":-7},
     "pipeline":   {"name":"PIPELINE",   "lat":21.665, "lon":-158.053, "orientation":330, "tide_station":"1612340", "Ks":1.778, "near_depth":2.0, "ndbc_buoy":"51201", "tz_offset":-10},
@@ -187,10 +187,11 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
     today     = now_local.date()
     now_mins  = now_local.hour * 60 + now_local.minute
 
-    # Window: -60 mins to +24*60 mins from now
-    win_start = now_mins - 60
-    win_end   = now_mins + 24 * 60
-    win_span  = 25 * 60  # total window in minutes
+    # Window: 18 hours total, now sits 1.5 hours past x=0
+    # x=0 = 1.5hrs ago, x=63 = 16.5hrs from now
+    win_start = now_mins - 90   # 1.5 hours ago
+    win_end   = now_mins + 990  # 16.5 hours from now
+    win_span  = 1080            # 18 hours in minutes
 
     # Fetch today + tomorrow + day after hilo predictions
     today_str    = now_local.strftime("%Y%m%d")
@@ -244,7 +245,7 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
 
     # Y axis: floor of lowest low, ceil of highest high in window
     window_vals = [v for _, v, _ in window_events]
-    y_min = math.floor(min(window_vals))
+    y_min = max(0, math.floor(min(window_vals)))
     y_max = math.ceil(max(window_vals))
     y_range = y_max - y_min if y_max > y_min else 1.0
 
@@ -270,7 +271,7 @@ async def fetch_tide_curve(client, station, tz_offset=-4):
             "type": typ
         })
 
-    now_x_frac     = (now_mins - win_start) / win_span  # should be ~0.04
+    now_x_frac     = 90 / win_span  # 1.5hrs / 18hrs = 0.0833 always
     current_y_norm = (current_val - y_min) / y_range
 
     print(f"Tide {station}: y={y_min}-{y_max}ft, {len(points)} pts, now_x={now_x_frac:.3f}, current_y={current_y_norm:.3f}")
