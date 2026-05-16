@@ -23,6 +23,7 @@ SPOTS = {
     "washout": {
         "name":"WASHOUT", "lat":32.646, "lon":-79.941, "orientation":100,
         "tide_station":"8666467", "Ks":1.495, "near_depth":4.0, "tz_offset":-4,
+        "face_mult":1.0,  # East Coast reports actual Hs
         "buoys": [
             {"id":"41004", "dist_km":81,  "dir_min":0,   "dir_max":360},  # primary — all directions
             {"id":"41025", "dist_km":495, "dir_min":0,   "dir_max":90},   # NE swells
@@ -31,6 +32,7 @@ SPOTS = {
     "iop": {
         "name":"IOP", "lat":32.787, "lon":-79.771, "orientation":95,
         "tide_station":"8666467", "Ks":1.414, "near_depth":5.0, "tz_offset":-4,
+        "face_mult":1.0,
         "buoys": [
             {"id":"41004", "dist_km":70,  "dir_min":0,   "dir_max":360},
             {"id":"41025", "dist_km":473, "dir_min":0,   "dir_max":90},
@@ -39,6 +41,7 @@ SPOTS = {
     "huntington": {
         "name":"HUNTINGTON", "lat":33.654, "lon":-118.003, "orientation":270,
         "tide_station":"9410660", "Ks":1.495, "near_depth":4.0, "tz_offset":-7,
+        "face_mult":1.7,  # California surf reports face height ~1.5-2x Hs
         "buoys": [
             {"id":"46086", "dist_km":141, "dir_min":130, "dir_max":260},  # S/SW swells
             {"id":"46047", "dist_km":197, "dir_min":260, "dir_max":360},  # NW/W swells
@@ -48,6 +51,7 @@ SPOTS = {
     "blacks": {
         "name":"BLACKS", "lat":32.856, "lon":-117.253, "orientation":270,
         "tide_station":"9410170", "Ks":1.622, "near_depth":6.0, "tz_offset":-7,
+        "face_mult":1.7,
         "buoys": [
             {"id":"46086", "dist_km":90,  "dir_min":130, "dir_max":260},  # S/SW swells
             {"id":"46047", "dist_km":218, "dir_min":260, "dir_max":360},  # NW/W swells
@@ -56,6 +60,7 @@ SPOTS = {
     "pipeline": {
         "name":"PIPELINE", "lat":21.665, "lon":-158.053, "orientation":330,
         "tide_station":"1612340", "Ks":1.778, "near_depth":2.0, "tz_offset":-10,
+        "face_mult":0.5,  # Hawaii uses Hawaiian scale (~half of Hs)
         "buoys": [
             {"id":"51001", "dist_km":476, "dir_min":270, "dir_max":360},  # N/NW swells
             {"id":"51201", "dist_km":7,   "dir_min":0,   "dir_max":360},  # local reference
@@ -214,6 +219,65 @@ async def fetch_ndbc(client, buoy_id):
 
     except Exception as e:
         print(f"NDBC {buoy_id} error: {e}")
+        return None
+
+async def fetch_wavewatch3(client, spot):
+    """
+    Fetch NOAA WAVEWATCH III forecast for tomorrow morning (~9am local)
+    Uses NOAA's ERDDAP server which serves WW3 as JSON
+    Returns primary swell components for tomorrow
+    """
+    try:
+        # WW3 global 0.5deg grid via NOAA ERDDAP
+        # We want forecast ~24hrs from now
+        from datetime import datetime as dt2
+        now_utc  = datetime.now(timezone.utc)
+        tmrw_utc = now_utc + timedelta(hours=24)
+        # Round to nearest 6hr forecast cycle
+        tmrw_str = tmrw_utc.strftime("%Y-%m-%dT%H:00:00Z")
+
+        lat  = spot["lat"]
+        lon  = spot["lon"] % 360  # WW3 uses 0-360
+
+        url = (
+            f"https://coastwatch.pfeg.noaa.gov/erddap/griddap/NWW3_Global_Best.json"
+            f"?Significant_height_of_combined_wind_waves_and_swell_surface"
+            f"[({tmrw_str})][(0.0)][({lat:.2f})][(lon:{lon:.2f})]"
+            f",Primary_wave_mean_period_surface"
+            f"[({tmrw_str})][(0.0)][({lat:.2f})][(lon:{lon:.2f})]"
+            f",Primary_wave_direction_surface"
+            f"[({tmrw_str})][(0.0)][({lat:.2f})][(lon:{lon:.2f})]"
+            f",Secondary_wave_mean_period_surface"
+            f"[({tmrw_str})][(0.0)][({lat:.2f})][(lon:{lon:.2f})]"
+            f",Secondary_wave_direction_surface"
+            f"[({tmrw_str})][(0.0)][({lat:.2f})][(lon:{lon:.2f})]"
+        )
+        r = await client.get(url, timeout=15)
+        if r.status_code != 200:
+            print(f"WW3 HTTP {r.status_code}")
+            return None
+        data = r.json()
+        rows = data.get("table", {}).get("rows", [])
+        if not rows:
+            return None
+        row = rows[0]
+        # columns: time, altitude, lat, lon, Hs, T1, D1, T2, D2
+        hs  = float(row[4]) if row[4] else None
+        t1  = float(row[5]) if row[5] else 8.0
+        d1  = float(row[6]) if row[6] else 270.0
+        t2  = float(row[7]) if row[7] else 8.0
+        d2  = float(row[8]) if row[8] else 270.0
+        if hs is None: return None
+        print(f"WW3 {spot['name']}: Hs={hs}m T1={t1}s D1={d1}° T2={t2}s D2={d2}°")
+        # Return as swell components
+        swells = []
+        if hs > 0.1:
+            swells.append({"height_m": hs * 0.7, "period_s": t1, "direction_deg": int(d1)})
+        if t2 > 0 and t2 != t1:
+            swells.append({"height_m": hs * 0.5, "period_s": t2, "direction_deg": int(d2)})
+        return swells
+    except Exception as e:
+        print(f"WW3 error: {e}")
         return None
 
 async def fetch_marine(client, spot):
@@ -447,6 +511,7 @@ async def get_surf(spot_id: str):
             fetch_tide_hilo(client, spot["tide_station"]),
             fetch_tide_curve(client, spot["tide_station"], spot.get("tz_offset", -4)),
             fetch_water_temp(client, spot),
+            fetch_wavewatch3(client, spot),
         ] + [fetch_ndbc(client, bid) for bid in buoy_ids]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -457,9 +522,10 @@ async def get_surf(spot_id: str):
     tide_hilo  = results[3]
     tide_curve = results[4]
     water_temp = results[5]
+    ww3_tmrw   = results[6] if isinstance(results[6], list) else None
     buoy_data  = {}
     for i, bid in enumerate(buoy_ids):
-        r = results[6+i]
+        r = results[7+i]
         if isinstance(r, list) and r:
             buoy_data[bid] = r
 
@@ -561,8 +627,10 @@ async def get_surf(spot_id: str):
     wlabel  = wind_label(wind_dir, spot["orientation"])
     wqual   = wind_quality(wind_dir, spot["orientation"], wind_mph)
 
-    disp_lo = round(ht_ft * 0.8, 1) if ht_ft >= 0.5 else 0.0
-    disp_hi = round(ht_ft * 1.25, 1) if ht_ft >= 0.5 else 1.0
+    fm      = spot.get("face_mult", 1.0)
+    disp_lo = round(ht_ft * fm * 0.8, 1) if ht_ft >= 0.5 else 0.0
+    disp_hi = round(ht_ft * fm * 1.25, 1) if ht_ft >= 0.5 else 1.0
+    tmrw_ft = tmrw_ft * fm
 
     return {
         "spot":         spot["name"],
