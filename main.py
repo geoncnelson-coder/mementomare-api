@@ -61,10 +61,12 @@ def wind_label(wd, orientation):
     if diff <= 105: return "SIDE-ON"
     return "ONSHORE"
 
-def wind_quality(wd, orientation):
+def wind_quality(wd, orientation, wind_mph=0):
     l = wind_label(wd, orientation)
     if l in ("OFFSHORE","SIDE-OFF"): return "good"
     if l == "SIDE-ON": return "marginal"
+    # Onshore — only bad if strong enough to matter
+    if wind_mph < 8: return "marginal"  # light onshore is barely noticeable
     return "bad"
 
 def calc_stars(ht, period, swell_dir, wd, wmph, spot):
@@ -417,7 +419,7 @@ async def get_surf(spot_id: str):
     stars   = calc_stars(ht_ft, off_p, off_d, wind_dir, wind_mph, spot)
     cond    = cond_label(stars, ht_ft)
     wlabel  = wind_label(wind_dir, spot["orientation"])
-    wqual   = wind_quality(wind_dir, spot["orientation"])
+    wqual   = wind_quality(wind_dir, spot["orientation"], wind_mph)
 
     disp_lo = round(ht_ft * 0.8, 1) if ht_ft >= 0.5 else 0.0
     disp_hi = round(ht_ft * 1.25, 1) if ht_ft >= 0.5 else 1.0
