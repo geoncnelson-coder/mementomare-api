@@ -435,19 +435,34 @@ async def get_surf(spot_id: str):
     if not spot:
         raise HTTPException(404, f"Spot '{spot_id}' not found")
 
+
     async with httpx.AsyncClient(verify=False) as client:
-        results = await asyncio.gather(
+        spot_buoys = spot.get("buoys", [])
+        buoy_ids   = list({b["id"] for b in spot_buoys})
+
+        tasks = [
             fetch_marine(client, spot),
             fetch_wind(client, spot),
             fetch_tide_now(client, spot["tide_station"]),
             fetch_tide_hilo(client, spot["tide_station"]),
             fetch_tide_curve(client, spot["tide_station"], spot.get("tz_offset", -4)),
             fetch_water_temp(client, spot),
-            fetch_ndbc(client, spot["ndbc_buoy"]) if spot["ndbc_buoy"] else asyncio.sleep(0),
-            return_exceptions=True
-        )
+        ] + [fetch_ndbc(client, bid) for bid in buoy_ids]
 
-    marine, wind, tide_now, tide_hilo, tide_curve, water_temp, buoy = results
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    marine     = results[0]
+    wind       = results[1]
+    tide_now   = results[2]
+    tide_hilo  = results[3]
+    tide_curve = results[4]
+    water_temp = results[5]
+    buoy_data  = {}
+    for i, bid in enumerate(buoy_ids):
+        r = results[6+i]
+        if isinstance(r, list) and r:
+            buoy_data[bid] = r
+
 
     # Multi-buoy wave height calculation
     # Each buoy contributes swells within its directional window
