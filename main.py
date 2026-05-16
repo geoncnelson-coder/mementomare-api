@@ -583,18 +583,6 @@ async def get_surf(spot_id: str):
     off_p = best_p
     off_d = best_d
 
-    # Tomorrow from Open-Meteo hourly
-    if isinstance(marine, dict) and "hourly" in marine:
-        wh = marine["hourly"]["wave_height"]
-        wp = marine["hourly"]["wave_period"]
-        wd = marine["hourly"]["wave_direction"]
-        idx = min(33, len(wh)-1)
-        tmrw_h = wh[idx] or 0.0
-        tmrw_p = wp[idx] or 6.0
-        tmrw_d = int(wd[idx] or off_d)
-    else:
-        tmrw_h = off_h; tmrw_p = off_p; tmrw_d = off_d
-
     # Wind
     wind_data = wind if isinstance(wind, dict) else {"current":{"wind_speed_10m":0,"wind_direction_10m":0},"hourly":{"wind_speed_10m":[0]*48,"wind_direction_10m":[0]*48}}
     wind_mph  = wind_data["current"].get("wind_speed_10m") or 0
@@ -616,16 +604,35 @@ async def get_surf(spot_id: str):
     tide_y_max     = tide_data.get("y_max", 7)
     wtemp = water_temp if isinstance(water_temp, (int,float)) else 0
 
-    tmrw_ft = nearshore_ft(tmrw_h, tmrw_p, tmrw_d, spot)
+    # Tomorrow wave height
+    # WW3 uses same multi-swell approach as current
+    if ww3_tmrw and isinstance(ww3_tmrw, list):
+        tmrw_energy = 0.0
+        for s in ww3_tmrw:
+            h = nearshore_ft(s["height_m"], s["period_s"], s["direction_deg"], spot)
+            tmrw_energy += h ** 2
+        tmrw_ft = round(math.sqrt(tmrw_energy), 2) if tmrw_energy > 0 else 0.0
+        print(f"WW3 tomorrow {spot['name']}: {tmrw_ft}ft")
+    elif isinstance(marine, dict) and "hourly" in marine:
+        wh = marine["hourly"]["wave_height"]
+        wp = marine["hourly"]["wave_period"]
+        wd = marine["hourly"]["wave_direction"]
+        idx = min(24, len(wh)-1)
+        tmrw_ft = nearshore_ft(wh[idx] or 0.0, wp[idx] or 6.0, int(wd[idx] or off_d), spot)
+    else:
+        tmrw_ft = ht_ft  # fallback to current
+
+    fm      = spot.get("face_mult", 1.0)
     stars   = calc_stars(ht_ft, off_p, off_d, wind_dir, wind_mph, spot)
     cond    = cond_label(stars, ht_ft)
     wlabel  = wind_label(wind_dir, spot["orientation"])
     wqual   = wind_quality(wind_dir, spot["orientation"], wind_mph)
 
-    fm      = spot.get("face_mult", 1.0)
-    disp_lo = round(ht_ft * fm * 0.8, 1) if ht_ft >= 0.5 else 0.0
-    disp_hi = round(ht_ft * fm * 1.25, 1) if ht_ft >= 0.5 else 1.0
-    tmrw_ft = tmrw_ft * fm
+    disp_lo  = round(ht_ft * fm * 0.8,  1) if ht_ft  >= 0.5 else 0.0
+    disp_hi  = round(ht_ft * fm * 1.25, 1) if ht_ft  >= 0.5 else 1.0
+    tmrw_lo  = round(tmrw_ft * fm * 0.8,  1) if tmrw_ft >= 0.5 else 0.0
+    tmrw_hi  = round(tmrw_ft * fm * 1.25, 1) if tmrw_ft >= 0.5 else 1.0
+    tmrw_disp = tmrw_ft * fm
 
     return {
         "spot":         spot["name"],
@@ -640,10 +647,10 @@ async def get_surf(spot_id: str):
         "wind_dir":     wind_dir,
         "wind_label":   wlabel,
         "wind_quality": wqual,
-        "tmrw_ht":      tmrw_ft,
-        "tmrw_ht_lo":   round(tmrw_ft * 0.8, 1) if tmrw_ft >= 0.5 else 0.0,
-        "tmrw_ht_hi":   round(tmrw_ft * 1.25, 1) if tmrw_ft >= 0.5 else 1.0,
-        "tmrw_flat":    tmrw_ft < 0.5,
+        "tmrw_ht":      tmrw_disp,
+        "tmrw_ht_lo":   tmrw_lo,
+        "tmrw_ht_hi":   tmrw_hi,
+        "tmrw_flat":    tmrw_disp < 0.5,
         "tide_now":     round(tide_cur, 2),
         "tide_min":     round(tide_mn, 2),
         "tide_max":     round(tide_mx, 2),
