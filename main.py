@@ -40,7 +40,7 @@ SPOTS = {
     },
     "huntington": {
         "name":"HUNTINGTON", "lat":33.654, "lon":-118.003, "orientation":270,
-        "tide_station":"9410660", "Ks":1.495, "near_depth":4.0, "tz_offset":-7,
+        "tide_station":"9410660", "Ks":0.45, "near_depth":4.0, "tz_offset":-7,
         "face_mult":1.7,  # California surf reports face height ~1.5-2x Hs
         "buoys": [
             {"id":"46086", "dist_km":141, "dir_min":130, "dir_max":260},  # S/SW swells
@@ -50,7 +50,7 @@ SPOTS = {
     },
     "blacks": {
         "name":"BLACKS", "lat":32.856, "lon":-117.253, "orientation":270,
-        "tide_station":"9410170", "Ks":1.622, "near_depth":6.0, "tz_offset":-7,
+        "tide_station":"9410170", "Ks":0.45, "near_depth":6.0, "tz_offset":-7,
         "face_mult":1.7,
         "buoys": [
             {"id":"46086", "dist_km":90,  "dir_min":130, "dir_max":260},  # S/SW swells
@@ -59,12 +59,11 @@ SPOTS = {
     },
     "pipeline": {
         "name":"PIPELINE", "lat":21.665, "lon":-158.053, "orientation":330,
-        "tide_station":"1612340", "Ks":1.778, "near_depth":2.0, "tz_offset":-10,
+        "tide_station":"1612340", "Ks":0.5, "near_depth":2.0, "tz_offset":-10,
         "face_mult":0.5,  # Hawaii uses Hawaiian scale (~half of Hs)
         "buoys": [
-            {"id":"51001", "dist_km":476, "dir_min":270, "dir_max":360},  # N/NW swells
-            {"id":"51201", "dist_km":7,   "dir_min":0,   "dir_max":360},  # local reference
-            {"id":"51004", "dist_km":751, "dir_min":130, "dir_max":270},  # south swells
+            {"id":"51001", "dist_km":476, "dir_min":270, "dir_max":45},   # N/NW swells only
+            {"id":"51201", "dist_km":7,   "dir_min":270, "dir_max":45},   # local N/NW reference
         ]
     },
 }
@@ -551,6 +550,9 @@ async def get_surf(spot_id: str):
                     in_window = d >= dir_min or d <= dir_max
 
                 if in_window:
+                    # Filter out wind waves (period < 8s) — they don't propagate to shore
+                    if s["period_s"] < 8.0:
+                        continue
                     h_near = nearshore_ft(s["height_m"], s["period_s"], d, spot)
                     energy_sum += h_near ** 2
                     if h_near > best_e:
