@@ -16,12 +16,52 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # ============================================================
 # SPOTS
 # ============================================================
+# Each spot has a list of buoys with their direction window
+# dir_min/dir_max = range of swell directions this buoy is authoritative for
+# If a swell component's direction falls in this window, use this buoy for it
 SPOTS = {
-    "washout":    {"name":"WASHOUT",    "lat":32.646, "lon":-79.941,  "orientation":100, "tide_station":"8666467", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":None,    "tz_offset":-4},
-    "iop":        {"name":"IOP",        "lat":32.787, "lon":-79.771,  "orientation":95,  "tide_station":"8666467", "Ks":1.414, "near_depth":5.0, "ndbc_buoy":None,    "tz_offset":-4},
-    "huntington": {"name":"HUNTINGTON", "lat":33.654, "lon":-118.003, "orientation":270, "tide_station":"9410660", "Ks":1.495, "near_depth":4.0, "ndbc_buoy":"46222", "tz_offset":-7},
-    "blacks":     {"name":"BLACKS",     "lat":32.856, "lon":-117.253, "orientation":270, "tide_station":"9410170", "Ks":1.622, "near_depth":6.0, "ndbc_buoy":"46225", "tz_offset":-7},
-    "pipeline":   {"name":"PIPELINE",   "lat":21.665, "lon":-158.053, "orientation":330, "tide_station":"1612340", "Ks":1.778, "near_depth":2.0, "ndbc_buoy":"51201", "tz_offset":-10},
+    "washout": {
+        "name":"WASHOUT", "lat":32.646, "lon":-79.941, "orientation":100,
+        "tide_station":"8666467", "Ks":1.495, "near_depth":4.0, "tz_offset":-4,
+        "buoys": [
+            {"id":"41004", "dist_km":81,  "dir_min":0,   "dir_max":360},  # primary — all directions
+            {"id":"41025", "dist_km":495, "dir_min":0,   "dir_max":90},   # NE swells
+        ]
+    },
+    "iop": {
+        "name":"IOP", "lat":32.787, "lon":-79.771, "orientation":95,
+        "tide_station":"8666467", "Ks":1.414, "near_depth":5.0, "tz_offset":-4,
+        "buoys": [
+            {"id":"41004", "dist_km":70,  "dir_min":0,   "dir_max":360},
+            {"id":"41025", "dist_km":473, "dir_min":0,   "dir_max":90},
+        ]
+    },
+    "huntington": {
+        "name":"HUNTINGTON", "lat":33.654, "lon":-118.003, "orientation":270,
+        "tide_station":"9410660", "Ks":1.495, "near_depth":4.0, "tz_offset":-7,
+        "buoys": [
+            {"id":"46086", "dist_km":141, "dir_min":130, "dir_max":260},  # S/SW swells
+            {"id":"46047", "dist_km":197, "dir_min":260, "dir_max":360},  # NW/W swells
+            {"id":"46025", "dist_km":98,  "dir_min":260, "dir_max":360},  # NW wind swell backup
+        ]
+    },
+    "blacks": {
+        "name":"BLACKS", "lat":32.856, "lon":-117.253, "orientation":270,
+        "tide_station":"9410170", "Ks":1.622, "near_depth":6.0, "tz_offset":-7,
+        "buoys": [
+            {"id":"46086", "dist_km":90,  "dir_min":130, "dir_max":260},  # S/SW swells
+            {"id":"46047", "dist_km":218, "dir_min":260, "dir_max":360},  # NW/W swells
+        ]
+    },
+    "pipeline": {
+        "name":"PIPELINE", "lat":21.665, "lon":-158.053, "orientation":330,
+        "tide_station":"1612340", "Ks":1.778, "near_depth":2.0, "tz_offset":-10,
+        "buoys": [
+            {"id":"51001", "dist_km":476, "dir_min":270, "dir_max":360},  # N/NW swells
+            {"id":"51201", "dist_km":7,   "dir_min":0,   "dir_max":360},  # local reference
+            {"id":"51004", "dist_km":751, "dir_min":130, "dir_max":270},  # south swells
+        ]
+    },
 }
 
 # ============================================================
@@ -409,39 +449,63 @@ async def get_surf(spot_id: str):
 
     marine, wind, tide_now, tide_hilo, tide_curve, water_temp, buoy = results
 
-    # Wave height — prefer NDBC buoy .spec data for Pacific spots
-    # Apply shoaling to each swell component separately, sum in quadrature
-    buoy_swells = buoy if isinstance(buoy, list) and buoy else None
+    # Multi-buoy wave height calculation
+    # Each buoy contributes swells within its directional window
+    # Sum all components in quadrature: H_total = sqrt(sum(H_i^2))
+    energy_sum = 0.0
+    best_p = 8.0
+    best_d = 90
+    best_e = 0.0
+    used_buoys = []
 
-    if buoy_swells:
-        # Sum nearshore heights in quadrature: H_total = sqrt(sum(H_i^2))
-        energy_sum = 0.0
-        best_p = 8.0
-        best_d = 270
-        best_e = 0.0
-        for s in buoy_swells:
-            h_near = nearshore_ft(s["height_m"], s["period_s"], s["direction_deg"], spot)
-            energy_sum += h_near ** 2
-            if h_near > best_e:
-                best_e = h_near
-                best_p = s["period_s"]
-                best_d = s["direction_deg"]
-        off_h = math.sqrt(energy_sum) if energy_sum > 0 else 0.0
-        # Convert back to meters for tomorrow calculation
-        off_h_m = off_h / 3.28084
-        off_p = best_p
-        off_d = best_d
-        print(f"NDBC multi-swell: {[(s['height_m'],s['period_s'],s['direction_deg']) for s in buoy_swells]} -> {off_h:.2f}ft nearshore")
-        # Use off_h directly as feet (already nearshore)
-        ht_ft = round(off_h, 2)
-    elif isinstance(marine, dict):
-        curr  = marine.get("current", {})
-        off_h_m = curr.get("wave_height") or 0.0
-        off_p = curr.get("wave_period") or 6.0
-        off_d = int(curr.get("wave_direction") or 90)
-        ht_ft = nearshore_ft(off_h_m, off_p, off_d, spot)
-    else:
-        raise HTTPException(502, "Marine data unavailable")
+    if buoy_data:
+        for buoy_cfg in spot.get("buoys", []):
+            bid = buoy_cfg["id"]
+            swells = buoy_data.get(bid, [])
+            dir_min = buoy_cfg["dir_min"]
+            dir_max = buoy_cfg["dir_max"]
+
+            for s in swells:
+                d = s["direction_deg"]
+                # Check if swell direction falls in this buoy's window
+                in_window = False
+                if dir_min <= dir_max:
+                    in_window = dir_min <= d <= dir_max
+                else:  # wraps around 360
+                    in_window = d >= dir_min or d <= dir_max
+
+                if in_window:
+                    h_near = nearshore_ft(s["height_m"], s["period_s"], d, spot)
+                    energy_sum += h_near ** 2
+                    if h_near > best_e:
+                        best_e = h_near
+                        best_p = s["period_s"]
+                        best_d = d
+                    used_buoys.append(f"{bid}:{s['height_m']}m@{d}°->{h_near:.1f}ft")
+
+        if energy_sum > 0:
+            ht_ft = round(math.sqrt(energy_sum), 2)
+            print(f"Multi-buoy {spot['name']}: {used_buoys} -> {ht_ft}ft")
+        else:
+            # No buoy data matched — fall back to Open-Meteo
+            print(f"No buoy match for {spot['name']}, using Open-Meteo")
+            buoy_data = {}
+
+    if not buoy_data or energy_sum == 0:
+        if isinstance(marine, dict):
+            curr  = marine.get("current", {})
+            off_h_m = curr.get("wave_height") or 0.0
+            off_p   = curr.get("wave_period") or 6.0
+            off_d   = int(curr.get("wave_direction") or 90)
+            ht_ft   = nearshore_ft(off_h_m, off_p, off_d, spot)
+            best_p  = off_p
+            best_d  = off_d
+            print(f"Open-Meteo {spot['name']}: {off_h_m}m -> {ht_ft}ft")
+        else:
+            raise HTTPException(502, "No wave data available")
+
+    off_p = best_p
+    off_d = best_d
 
     # Tomorrow from Open-Meteo hourly
     if isinstance(marine, dict) and "hourly" in marine:
@@ -476,7 +540,6 @@ async def get_surf(spot_id: str):
     tide_y_max     = tide_data.get("y_max", 7)
     wtemp = water_temp if isinstance(water_temp, (int,float)) else 0
 
-    # ht_ft already set above
     tmrw_ft = nearshore_ft(tmrw_h, tmrw_p, tmrw_d, spot)
     stars   = calc_stars(ht_ft, off_p, off_d, wind_dir, wind_mph, spot)
     cond    = cond_label(stars, ht_ft)
