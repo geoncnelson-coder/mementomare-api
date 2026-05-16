@@ -82,9 +82,11 @@ def refraction_kr(theta_deg, d_off, d_near):
     return math.sqrt(cos_off / cos_near)
 
 def swell_angle(swell_dir, orientation):
-    shore_normal = (orientation + 180) % 360
-    diff = abs(swell_dir - shore_normal)
-    return float(360 - diff if diff > 180 else diff)
+    # orientation = direction beach faces = direction waves come FROM to hit it
+    # e.g. Washout faces ESE (100deg) = waves come from 100deg to hit beach
+    diff = abs(swell_dir - orientation)
+    if diff > 180: diff = 360 - diff
+    return float(diff)
 
 def period_factor(p):
     if p >= 14: return 1.15
@@ -99,7 +101,9 @@ def nearshore_ft(off_m, period, swell_dir, spot):
     return round(H * 3.28084, 2)
 
 def wind_label(wd, orientation):
-    diff = abs(wd - (orientation + 180) % 360)
+    # Offshore wind blows FROM land TO sea = opposite of beach facing direction
+    offshore_dir = (orientation + 180) % 360
+    diff = abs(wd - offshore_dir)
     if diff > 180: diff = 360 - diff
     if diff <= 45:  return "OFFSHORE"
     if diff <= 75:  return "SIDE-OFF"
@@ -223,61 +227,52 @@ async def fetch_ndbc(client, buoy_id):
 
 async def fetch_wavewatch3(client, spot):
     """
-    Fetch NOAA WAVEWATCH III forecast for tomorrow morning (~9am local)
-    Uses NOAA's ERDDAP server which serves WW3 as JSON
-    Returns primary swell components for tomorrow
+    Fetch NOAA WAVEWATCH III 24hr forecast via Open-Meteo marine forecast
+    Uses marine-api.open-meteo.com hourly at index 24 (24hrs from now)
+    More reliable than ERDDAP for our use case
     """
     try:
-        # WW3 global 0.5deg grid via NOAA ERDDAP
-        # We want forecast ~24hrs from now
-        from datetime import datetime as dt2
-        now_utc  = datetime.now(timezone.utc)
-        tmrw_utc = now_utc + timedelta(hours=24)
-        # Round to nearest 6hr forecast cycle
-        tmrw_str = tmrw_utc.strftime("%Y-%m-%dT%H:00:00Z")
-
-        lat  = spot["lat"]
-        lon  = spot["lon"] % 360  # WW3 uses 0-360
-
+        lat = spot["lat"]
+        lon = spot["lon"]
         url = (
-            f"https://coastwatch.pfeg.noaa.gov/erddap/griddap/NWW3_Global_Best.json"
-            f"?Significant_height_of_combined_wind_waves_and_swell_surface"
-            f"[({tmrw_str})][(0.0)][({lat:.2f})][(lon:{lon:.2f})]"
-            f",Primary_wave_mean_period_surface"
-            f"[({tmrw_str})][(0.0)][({lat:.2f})][(lon:{lon:.2f})]"
-            f",Primary_wave_direction_surface"
-            f"[({tmrw_str})][(0.0)][({lat:.2f})][(lon:{lon:.2f})]"
-            f",Secondary_wave_mean_period_surface"
-            f"[({tmrw_str})][(0.0)][({lat:.2f})][(lon:{lon:.2f})]"
-            f",Secondary_wave_direction_surface"
-            f"[({tmrw_str})][(0.0)][({lat:.2f})][(lon:{lon:.2f})]"
+            f"https://marine-api.open-meteo.com/v1/marine"
+            f"?latitude={lat}&longitude={lon}"
+            f"&hourly=wave_height,wave_period,wave_direction"
+            f",swell_wave_height,swell_wave_period,swell_wave_direction"
+            f",&forecast_days=3&timezone=GMT"
         )
         r = await client.get(url, timeout=15)
         if r.status_code != 200:
-            print(f"WW3 HTTP {r.status_code}")
+            print(f"WW3/marine HTTP {r.status_code}")
             return None
         data = r.json()
-        rows = data.get("table", {}).get("rows", [])
-        if not rows:
-            return None
-        row = rows[0]
-        # columns: time, altitude, lat, lon, Hs, T1, D1, T2, D2
-        hs  = float(row[4]) if row[4] else None
-        t1  = float(row[5]) if row[5] else 8.0
-        d1  = float(row[6]) if row[6] else 270.0
-        t2  = float(row[7]) if row[7] else 8.0
-        d2  = float(row[8]) if row[8] else 270.0
-        if hs is None: return None
-        print(f"WW3 {spot['name']}: Hs={hs}m T1={t1}s D1={d1}° T2={t2}s D2={d2}°")
-        # Return as swell components
+        hourly = data.get("hourly", {})
+        wh  = hourly.get("wave_height", [])
+        wp  = hourly.get("wave_period", [])
+        wd  = hourly.get("wave_direction", [])
+        swh = hourly.get("swell_wave_height", [])
+        swp = hourly.get("swell_wave_period", [])
+        swd = hourly.get("swell_wave_direction", [])
+
+        # Index 24 = 24hrs from now
+        idx = min(24, len(wh)-1)
         swells = []
-        if hs > 0.1:
-            swells.append({"height_m": hs * 0.7, "period_s": t1, "direction_deg": int(d1)})
-        if t2 > 0 and t2 != t1:
-            swells.append({"height_m": hs * 0.5, "period_s": t2, "direction_deg": int(d2)})
-        return swells
+        h1 = wh[idx] if wh else None
+        p1 = wp[idx] if wp else 8.0
+        d1 = wd[idx] if wd else 270
+        h2 = swh[idx] if swh else None
+        p2 = swp[idx] if swp else 10.0
+        d2 = swd[idx] if swd else 270
+
+        if h1 and h1 > 0.05:
+            swells.append({"height_m": float(h1), "period_s": float(p1 or 8), "direction_deg": int(d1 or 270)})
+        if h2 and h2 > 0.05 and h2 != h1:
+            swells.append({"height_m": float(h2), "period_s": float(p2 or 10), "direction_deg": int(d2 or 270)})
+
+        print(f"WW3 {spot['name']} tmrw: {[(s['height_m'],s['period_s'],s['direction_deg']) for s in swells]}")
+        return swells if swells else None
     except Exception as e:
-        print(f"WW3 error: {e}")
+        print(f"WW3 error {spot['name']}: {e}")
         return None
 
 async def fetch_marine(client, spot):
