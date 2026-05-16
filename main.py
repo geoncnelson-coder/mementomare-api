@@ -102,32 +102,76 @@ async def fetch_with_retry(client, url, attempts=3, timeout=15):
     return None
 
 async def fetch_ndbc(client, buoy_id):
-    """Parse NDBC standard met text file"""
+    """
+    Parse NDBC .spec file for separate swell components.
+    Returns list of swells: [{height_m, period_s, direction_deg}, ...]
+    We apply shoaling to each component separately then sum in quadrature.
+    """
     try:
-        url = f"https://www.ndbc.noaa.gov/data/realtime2/{buoy_id}.txt"
+        url = f"https://www.ndbc.noaa.gov/data/realtime2/{buoy_id}.spec"
         r = await client.get(url, timeout=15)
         if r.status_code != 200:
-            print(f"NDBC {buoy_id}: HTTP {r.status_code}")
-            return None
+            print(f"NDBC {buoy_id} spec: HTTP {r.status_code}, falling back to .txt")
+            # Fallback to standard met file
+            url2 = f"https://www.ndbc.noaa.gov/data/realtime2/{buoy_id}.txt"
+            r = await client.get(url2, timeout=15)
+            if r.status_code != 200:
+                return None
+            lines = [l for l in r.text.strip().split("\n") if l.strip()]
+            if len(lines) < 3: return None
+            headers = lines[0].lstrip("#").split()
+            data    = lines[2].split()
+            obs = {headers[i]: data[i] for i in range(min(len(headers), len(data)))}
+            def sf(k):
+                v = obs.get(k, "MM")
+                try:
+                    f = float(v)
+                    return None if f > 900 else f
+                except: return None
+            wvht = sf("WVHT")
+            dpd  = sf("DPD") or sf("APD")
+            mwd  = sf("MWD")
+            if wvht is None: return None
+            return [{"height_m": wvht, "period_s": dpd or 8.0, "direction_deg": int(mwd or 270)}]
+
         lines = [l for l in r.text.strip().split("\n") if l.strip()]
-        if len(lines) < 3:
-            print(f"NDBC {buoy_id}: not enough lines")
-            return None
+        if len(lines) < 3: return None
+
+        # Parse headers — spec file has two header rows
         headers = lines[0].lstrip("#").split()
         data    = lines[2].split()
         obs = {headers[i]: data[i] for i in range(min(len(headers), len(data)))}
-        def safe(k):
-            v = obs.get(k,"MM")
+
+        def sf(k):
+            v = obs.get(k, "MM")
             try:
                 f = float(v)
                 return None if f > 900 else f
             except: return None
-        wvht = safe("WVHT")
-        dpd  = safe("DPD") or safe("APD")
-        mwd  = safe("MWD")
-        print(f"NDBC {buoy_id}: WVHT={wvht} DPD={dpd} MWD={mwd}")
-        if wvht is None: return None
-        return {"wave_height": wvht, "wave_period": dpd or 8.0, "wave_direction": int(mwd or 270)}
+
+        swells = []
+
+        # Primary swell
+        swh = sf("SwH"); swp = sf("SwP"); swd = sf("SwD")
+        if swh and swh > 0.05:
+            # SwD is reported as compass direction string (N, NE, etc.) or degrees
+            try:
+                d = float(swd) if swd else 270
+            except:
+                dirs = {"N":0,"NNE":22,"NE":45,"ENE":67,"E":90,"ESE":112,"SE":135,
+                        "SSE":157,"S":180,"SSW":202,"SW":225,"WSW":247,"W":270,
+                        "WNW":292,"NW":315,"NNW":337}
+                d = dirs.get(str(swd), 270)
+            swells.append({"height_m": swh, "period_s": swp or 10.0, "direction_deg": int(d)})
+
+        # Wind waves
+        wwh = sf("WWH"); wwp = sf("WWP"); wwd = sf("WWD")
+        if wwh and wwh > 0.05:
+            swells.append({"height_m": wwh, "period_s": wwp or 6.0, "direction_deg": int(wwd or 270)})
+
+        print(f"NDBC {buoy_id} spec: {len(swells)} components: {[(s['height_m'],s['period_s'],s['direction_deg']) for s in swells]}")
+        return swells if swells else None
+
     except Exception as e:
         print(f"NDBC {buoy_id} error: {e}")
         return None
@@ -365,18 +409,37 @@ async def get_surf(spot_id: str):
 
     marine, wind, tide_now, tide_hilo, tide_curve, water_temp, buoy = results
 
-    # Wave height — prefer NDBC buoy for Pacific spots
-    buoy_data = buoy if isinstance(buoy, dict) and buoy else None
-    if buoy_data and buoy_data.get("wave_height"):
-        off_h = buoy_data["wave_height"]
-        off_p = buoy_data.get("wave_period") or 8.0
-        off_d = int(buoy_data.get("wave_direction") or 270)
-        print(f"Using NDBC buoy: {off_h}m {off_p}s {off_d}deg")
+    # Wave height — prefer NDBC buoy .spec data for Pacific spots
+    # Apply shoaling to each swell component separately, sum in quadrature
+    buoy_swells = buoy if isinstance(buoy, list) and buoy else None
+
+    if buoy_swells:
+        # Sum nearshore heights in quadrature: H_total = sqrt(sum(H_i^2))
+        energy_sum = 0.0
+        best_p = 8.0
+        best_d = 270
+        best_e = 0.0
+        for s in buoy_swells:
+            h_near = nearshore_ft(s["height_m"], s["period_s"], s["direction_deg"], spot)
+            energy_sum += h_near ** 2
+            if h_near > best_e:
+                best_e = h_near
+                best_p = s["period_s"]
+                best_d = s["direction_deg"]
+        off_h = math.sqrt(energy_sum) if energy_sum > 0 else 0.0
+        # Convert back to meters for tomorrow calculation
+        off_h_m = off_h / 3.28084
+        off_p = best_p
+        off_d = best_d
+        print(f"NDBC multi-swell: {[(s['height_m'],s['period_s'],s['direction_deg']) for s in buoy_swells]} -> {off_h:.2f}ft nearshore")
+        # Use off_h directly as feet (already nearshore)
+        ht_ft = round(off_h, 2)
     elif isinstance(marine, dict):
         curr  = marine.get("current", {})
-        off_h = curr.get("wave_height") or 0.0
+        off_h_m = curr.get("wave_height") or 0.0
         off_p = curr.get("wave_period") or 6.0
         off_d = int(curr.get("wave_direction") or 90)
+        ht_ft = nearshore_ft(off_h_m, off_p, off_d, spot)
     else:
         raise HTTPException(502, "Marine data unavailable")
 
@@ -413,8 +476,7 @@ async def get_surf(spot_id: str):
     tide_y_max     = tide_data.get("y_max", 7)
     wtemp = water_temp if isinstance(water_temp, (int,float)) else 0
 
-    # Compute surf
-    ht_ft   = nearshore_ft(off_h, off_p, off_d, spot)
+    # ht_ft already set above
     tmrw_ft = nearshore_ft(tmrw_h, tmrw_p, tmrw_d, spot)
     stars   = calc_stars(ht_ft, off_p, off_d, wind_dir, wind_mph, spot)
     cond    = cond_label(stars, ht_ft)
